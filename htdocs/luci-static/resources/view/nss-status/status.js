@@ -45,30 +45,29 @@ var STYLE = '' +
 		'border-radius:6px;background:rgba(128,128,128,.1);font-size:12px;' +
 		'line-height:1.5;white-space:pre-wrap;word-break:break-all}' +
 	/*
-	 * 表格完全不依赖主题。第三方主题（Argon / Aurora / 各种魔改）对 table 的
-	 * 处理差别很大：有的把 td 改成 display:block 做「窄屏卡片式」，有的给
-	 * th/td 加 !important 的 text-align，还有的干脆不定义 .table 类。只写内联
-	 * text-align 在 display:block 下毫无作用——单元格变成上下堆叠，看着就是
-	 * 「没对齐」。所以这里把显示模型本身也钉死，并且只用 !important 覆盖。
+	 * 不用 <table>。Argon / Aurora / 各种魔改主题对 table/th/td 的规则太多，
+	 * 而且经常带 !important 和更高的选择器特异性：有的把 td 改成 display:block
+	 * 做「窄屏卡片式」，有的给 th/td 不同的 padding/width，结果就是列宽由
+	 * colgroup 定了、单元格内边距却各不相同，右对齐的数字挨个错开几个像素。
+	 * 内联 style 和 .nss-tbl .c 这类选择器都压不住别人的 !important。
+	 *
+	 * 改用 CSS Grid：表头行和数据行共用同一个 grid-template-columns，列宽由
+	 * 浏览器按 fr 分配，主题对 table 的那一套完全失效，也永远不会出现「表头
+	 * 和数据两套宽度」的错位。
 	 */
-	'.nss-tblbox{width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}' +
-	'.nss-tbl{display:table!important;width:100%!important;min-width:520px;' +
-		'table-layout:fixed!important;' +
-		'border-collapse:collapse!important;border-spacing:0!important;margin:0!important}' +
-	'.nss-tbl>thead{display:table-header-group!important}' +
-	'.nss-tbl>tbody{display:table-row-group!important}' +
-	'.nss-tbl>thead>tr,.nss-tbl>tbody>tr{display:table-row!important;' +
-		'background:none!important;border:0!important}' +
-	'.nss-tbl th,.nss-tbl td{display:table-cell!important;' +
-		'padding:.4rem .5rem!important;margin:0!important;border:0!important;' +
-		'border-bottom:1px solid rgba(128,128,128,.18)!important;' +
-		'font-size:13px;line-height:1.5;vertical-align:middle!important;' +
-		'white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
-	'.nss-tbl th{font-weight:600;font-size:12px;opacity:.78}' +
-	'.nss-tbl .c{text-align:center!important}' +
-	'.nss-tbl .r{text-align:right!important;font-variant-numeric:tabular-nums;' +
-		'font-feature-settings:"tnum" 1}' +
-	'.nss-tbl code{padding:0;background:none;font-size:12px}';
+	'.nss-gwrap{width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}' +
+	'.nss-grid{width:100%;min-width:460px;display:block;margin:0}' +
+	'.nss-gr{display:grid!important;align-items:center;box-sizing:border-box;' +
+		'padding:.42rem .5rem;border-bottom:1px solid rgba(128,128,128,.18);' +
+		'font-size:13px;line-height:1.5;column-gap:0}' +
+	'.nss-gh{font-weight:600;font-size:12px;opacity:.78;padding-top:.32rem;' +
+		'padding-bottom:.32rem}' +
+	'.nss-gc{display:block;min-width:0;white-space:nowrap;overflow:hidden;' +
+		'text-overflow:ellipsis}' +
+	'.nss-gc.c{text-align:center}' +
+	'.nss-gc.r{text-align:right;font-variant-numeric:tabular-nums}' +
+	'.nss-gc.e{grid-column:1/-1;opacity:.6}' +
+	'.nss-grid code{padding:0;background:none;font-size:12px}';
 
 var GREEN = '#43a047', RED = '#e53935', BLUE = '#2196f3', DIM = 'rgba(128,128,128,.45)';
 
@@ -285,30 +284,36 @@ return view.extend({
 		 * 内联 text-align 保留，是主题样式表被拦掉时的兜底。真正管事的是
 		 * STYLE 里 .nss-tbl .c / .r 那两条 !important。
 		 */
-		var th = function(t, align) {
-			return E('th', {
-				'class': 'nss-th' + (align === 'center' ? ' c' : align === 'right' ? ' r' : ''),
-				'style': align ? 'text-align:' + align : ''
-			}, [ t ]);
+		/*
+		 * 表头和数据共用同一组列定义（fr 单位），这是「对齐」的唯一来源：
+		 * 两行各建一个独立 grid，但 template 完全一致，所以永远不会偏。
+		 */
+		var VCOLS = '1fr 1.4fr 1.6fr 1.4fr 1.3fr 1.3fr 1.3fr';
+		var FCOLS = '2fr 1fr 1fr 1fr';
+
+		var cell = function(content, align) {
+			return E('div', {
+				'class': 'nss-gc' + (align === 'center' ? ' c' : align === 'right' ? ' r' : '')
+			}, Array.isArray(content) ? content : [ content ]);
 		};
 
-		var td = function(content, align) {
-			return E('td', {
-				'class': 'nss-td' + (align === 'center' ? ' c' : align === 'right' ? ' r' : ''),
-				'style': align ? 'text-align:' + align : ''
-			}, content);
+		var grow = function(cols, cells, head) {
+			return E('div', {
+				'class': 'nss-gr' + (head ? ' nss-gh' : ''),
+				'style': 'grid-template-columns:' + cols
+			}, cells);
 		};
 
 		/* ---- 接口收发 ---- */
-		var vdevBody = E('tbody', {});
+		var vdevBody = E('div', {});
 
 		function rowsVdev(raw, list) {
 			while (vdevBody.firstChild)
 				vdevBody.removeChild(vdevBody.firstChild);
 
 			if (list.length === 0) {
-				vdevBody.appendChild(E('tr', { 'class': 'tr placeholder' }, [
-					E('td', { 'class': 'td', 'colspan': '7' }, [
+				vdevBody.appendChild(grow(VCOLS, [
+					E('div', { 'class': 'nss-gc e' }, [
 						raw === '' ? '无数据' : '尚未上报 vdev'
 					])
 				]));
@@ -316,20 +321,20 @@ return view.extend({
 			}
 
 			list.forEach(function(v) {
-				vdevBody.appendChild(E('tr', { 'class': 'tr' }, [
-					td([ E('code', {}, [ String(v.ifnum) ]) ], 'center'),
-					td([ fmtNum(v.rx) ], 'right'),
-					td([ fmtBytes(v.bytes) ], 'right'),
-					td([ fmtNum(v.tx) ], 'right'),
-					td([ String(v.except || 0) ], 'right'),
-					td([ String(v.dropped || 0) ], 'right'),
-					td([ String(v.hw_ring_full || 0) ], 'right')
+				vdevBody.appendChild(grow(VCOLS, [
+					cell([ E('code', {}, [ String(v.ifnum) ]) ], 'center'),
+					cell([ fmtNum(v.rx) ], 'right'),
+					cell([ fmtBytes(v.bytes) ], 'right'),
+					cell([ fmtNum(v.tx) ], 'right'),
+					cell([ String(v.except || 0) ], 'right'),
+					cell([ String(v.dropped || 0) ], 'right'),
+					cell([ String(v.hw_ring_full || 0) ], 'right')
 				]));
 			});
 		}
 
 		/* ---- 流转发 ---- */
-		var flowBody = E('tbody', {});
+		var flowBody = E('div', {});
 		var flowSummary = E('span', { 'style': 'font-size:12px;opacity:.65' });
 
 		function rowsFlow(flows) {
@@ -339,18 +344,18 @@ return view.extend({
 			flowSummary.textContent = 'bound ' + flows.bound + ' / pushed ' + flows.pushed;
 
 			if (flows.nodes.length === 0) {
-				flowBody.appendChild(E('tr', { 'class': 'tr placeholder' }, [
-					E('td', { 'class': 'td', 'colspan': '4' }, [ '尚未下发流转发节点' ])
+				flowBody.appendChild(grow(FCOLS, [
+					E('div', { 'class': 'nss-gc e' }, [ '尚未下发流转发节点' ])
 				]));
 				return;
 			}
 
 			flows.nodes.forEach(function(n) {
-				flowBody.appendChild(E('tr', { 'class': 'tr' }, [
-					td([ E('code', {}, [ n.name ]) ]),
-					td([ fmtNum(n.rx) ], 'right'),
-					td([ fmtNum(n.tx) ], 'right'),
-					td([ n.drop ], 'right')
+				flowBody.appendChild(grow(FCOLS, [
+					cell([ E('code', {}, [ n.name ]) ]),
+					cell([ fmtNum(n.rx) ], 'right'),
+					cell([ fmtNum(n.tx) ], 'right'),
+					cell([ n.drop ], 'right')
 				]));
 			});
 		}
@@ -358,43 +363,26 @@ return view.extend({
 		rowsVdev(data[1], parseVdevs(data[1]));
 		rowsFlow(parseFlows(data[2]));
 
-		/* 列宽写死成百分比，配合 table-layout:fixed：数字位数变化不会让整张表
-		 * 跟着跳。外层的 nss-tblbox 负责窄屏横向滚动，而不是靠主题去挤。 */
-		var vdevTable = E('div', { 'class': 'nss-tblbox' }, [
-			E('table', { 'class': 'table nss-tbl' }, [
-				E('colgroup', {}, [
-					E('col', { 'style': 'width:11%' }),
-					E('col', { 'style': 'width:15%' }),
-					E('col', { 'style': 'width:17%' }),
-					E('col', { 'style': 'width:15%' }),
-					E('col', { 'style': 'width:14%' }),
-					E('col', { 'style': 'width:14%' }),
-					E('col', { 'style': 'width:14%' })
-				]),
-				E('thead', {}, [
-					E('tr', { 'class': 'tr table-titles' }, [
-						th('接口号', 'center'), th('收包', 'right'), th('收字节', 'right'),
-						th('发包', 'right'), th('例外', 'right'), th('丢弃', 'right'),
-						th('Ring 满', 'right')
-					])
-				]),
+		/* 列宽由 fr 分配，表头行和数据行共用同一个 template，所以不可能错位。
+		 * 外层 nss-gwrap 负责窄屏横向滚动。 */
+		var vdevTable = E('div', { 'class': 'nss-gwrap' }, [
+			E('div', { 'class': 'nss-grid' }, [
+				grow(VCOLS, [
+					cell('接口号', 'center'), cell('收包', 'right'),
+					cell('收字节', 'right'), cell('发包', 'right'),
+					cell('例外', 'right'), cell('丢弃', 'right'),
+					cell('Ring 满', 'right')
+				], true),
 				vdevBody
 			])
 		]);
 
-		var flowTable = E('div', { 'class': 'nss-tblbox' }, [
-			E('table', { 'class': 'table nss-tbl' }, [
-				E('colgroup', {}, [
-					E('col', { 'style': 'width:40%' }),
-					E('col', { 'style': 'width:20%' }),
-					E('col', { 'style': 'width:20%' }),
-					E('col', { 'style': 'width:20%' })
-				]),
-				E('thead', {}, [
-					E('tr', { 'class': 'tr table-titles' }, [
-						th('节点'), th('收包', 'right'), th('发包', 'right'), th('丢弃', 'right')
-					])
-				]),
+		var flowTable = E('div', { 'class': 'nss-gwrap' }, [
+			E('div', { 'class': 'nss-grid' }, [
+				grow(FCOLS, [
+					cell('节点'), cell('收包', 'right'),
+					cell('发包', 'right'), cell('丢弃', 'right')
+				], true),
 				flowBody
 			])
 		]);
