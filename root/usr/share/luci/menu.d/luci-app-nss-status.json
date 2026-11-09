@@ -1,0 +1,13 @@
+{
+	"admin/status/nss": {
+		"title": "NSS 卸载",
+		"order": 60,
+		"action": {
+			"type": "view",
+			"path": "nss-status/status"
+		},
+		"depends": {
+			"acl": [ "luci-app-nss-status" ]
+		}
+	}
+}

@@ -1,0 +1,12 @@
+{
+	"luci-app-nss-status": {
+		"description": "Read NSS Wi-Fi offload state, per-vdev statistics and the offloaded flow table",
+		"read": {
+			"file": {
+				"/bin/cat": [ "exec" ],
+				"/bin/sh": [ "exec" ]
+			}
+		},
+		"write": {}
+	}
+}
