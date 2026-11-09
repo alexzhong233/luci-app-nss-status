@@ -43,7 +43,32 @@ var STYLE = '' +
 	'.nss-tabs{display:flex;gap:.4rem;margin:.2rem 0 .8rem}' +
 	'.nss-pre{max-height:32rem;overflow:auto;margin:0;padding:.6rem .7rem;' +
 		'border-radius:6px;background:rgba(128,128,128,.1);font-size:12px;' +
-		'line-height:1.5;white-space:pre-wrap;word-break:break-all}';
+		'line-height:1.5;white-space:pre-wrap;word-break:break-all}' +
+	/*
+	 * 表格完全不依赖主题。第三方主题（Argon / Aurora / 各种魔改）对 table 的
+	 * 处理差别很大：有的把 td 改成 display:block 做「窄屏卡片式」，有的给
+	 * th/td 加 !important 的 text-align，还有的干脆不定义 .table 类。只写内联
+	 * text-align 在 display:block 下毫无作用——单元格变成上下堆叠，看着就是
+	 * 「没对齐」。所以这里把显示模型本身也钉死，并且只用 !important 覆盖。
+	 */
+	'.nss-tblbox{width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}' +
+	'.nss-tbl{display:table!important;width:100%!important;min-width:520px;' +
+		'table-layout:fixed!important;' +
+		'border-collapse:collapse!important;border-spacing:0!important;margin:0!important}' +
+	'.nss-tbl>thead{display:table-header-group!important}' +
+	'.nss-tbl>tbody{display:table-row-group!important}' +
+	'.nss-tbl>thead>tr,.nss-tbl>tbody>tr{display:table-row!important;' +
+		'background:none!important;border:0!important}' +
+	'.nss-tbl th,.nss-tbl td{display:table-cell!important;' +
+		'padding:.4rem .5rem!important;margin:0!important;border:0!important;' +
+		'border-bottom:1px solid rgba(128,128,128,.18)!important;' +
+		'font-size:13px;line-height:1.5;vertical-align:middle!important;' +
+		'white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
+	'.nss-tbl th{font-weight:600;font-size:12px;opacity:.78}' +
+	'.nss-tbl .c{text-align:center!important}' +
+	'.nss-tbl .r{text-align:right!important;font-variant-numeric:tabular-nums;' +
+		'font-feature-settings:"tnum" 1}' +
+	'.nss-tbl code{padding:0;background:none;font-size:12px}';
 
 var GREEN = '#43a047', RED = '#e53935', BLUE = '#2196f3', DIM = 'rgba(128,128,128,.45)';
 
@@ -255,17 +280,21 @@ return view.extend({
 				ok ? '数据平面已就绪' : '数据平面未就绪'));
 		}
 
-		/* 对齐同时写 class 和内联 style：第三方主题不一定定义 .th.center/.td.right。 */
+		/*
+		 * 只用单字母类名 c / r，和主题可能定义的 .center / .right 之类错开；
+		 * 内联 text-align 保留，是主题样式表被拦掉时的兜底。真正管事的是
+		 * STYLE 里 .nss-tbl .c / .r 那两条 !important。
+		 */
 		var th = function(t, align) {
 			return E('th', {
-				'class': 'th' + (align ? ' ' + align : ''),
+				'class': 'nss-th' + (align === 'center' ? ' c' : align === 'right' ? ' r' : ''),
 				'style': align ? 'text-align:' + align : ''
 			}, [ t ]);
 		};
 
 		var td = function(content, align) {
 			return E('td', {
-				'class': 'td' + (align ? ' ' + align : ''),
+				'class': 'nss-td' + (align === 'center' ? ' c' : align === 'right' ? ' r' : ''),
 				'style': align ? 'text-align:' + align : ''
 			}, content);
 		};
@@ -329,24 +358,45 @@ return view.extend({
 		rowsVdev(data[1], parseVdevs(data[1]));
 		rowsFlow(parseFlows(data[2]));
 
-		var vdevTable = E('table', { 'class': 'table' }, [
-			E('thead', {}, [
-				E('tr', { 'class': 'tr table-titles' }, [
-					th('接口号', 'center'), th('收包', 'right'), th('收字节', 'right'),
-					th('发包', 'right'), th('例外', 'right'), th('丢弃', 'right'),
-					th('Ring 满', 'right')
-				])
-			]),
-			vdevBody
+		/* 列宽写死成百分比，配合 table-layout:fixed：数字位数变化不会让整张表
+		 * 跟着跳。外层的 nss-tblbox 负责窄屏横向滚动，而不是靠主题去挤。 */
+		var vdevTable = E('div', { 'class': 'nss-tblbox' }, [
+			E('table', { 'class': 'table nss-tbl' }, [
+				E('colgroup', {}, [
+					E('col', { 'style': 'width:11%' }),
+					E('col', { 'style': 'width:15%' }),
+					E('col', { 'style': 'width:17%' }),
+					E('col', { 'style': 'width:15%' }),
+					E('col', { 'style': 'width:14%' }),
+					E('col', { 'style': 'width:14%' }),
+					E('col', { 'style': 'width:14%' })
+				]),
+				E('thead', {}, [
+					E('tr', { 'class': 'tr table-titles' }, [
+						th('接口号', 'center'), th('收包', 'right'), th('收字节', 'right'),
+						th('发包', 'right'), th('例外', 'right'), th('丢弃', 'right'),
+						th('Ring 满', 'right')
+					])
+				]),
+				vdevBody
+			])
 		]);
 
-		var flowTable = E('table', { 'class': 'table' }, [
-			E('thead', {}, [
-				E('tr', { 'class': 'tr table-titles' }, [
-					th('节点'), th('收包', 'right'), th('发包', 'right'), th('丢弃', 'right')
-				])
-			]),
-			flowBody
+		var flowTable = E('div', { 'class': 'nss-tblbox' }, [
+			E('table', { 'class': 'table nss-tbl' }, [
+				E('colgroup', {}, [
+					E('col', { 'style': 'width:40%' }),
+					E('col', { 'style': 'width:20%' }),
+					E('col', { 'style': 'width:20%' }),
+					E('col', { 'style': 'width:20%' })
+				]),
+				E('thead', {}, [
+					E('tr', { 'class': 'tr table-titles' }, [
+						th('节点'), th('收包', 'right'), th('发包', 'right'), th('丢弃', 'right')
+					])
+				]),
+				flowBody
+			])
 		]);
 
 		/* ---- 两个面板 ---- */
