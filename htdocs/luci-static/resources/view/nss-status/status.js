@@ -356,8 +356,8 @@ return view.extend({
 		 * 表头和数据共用同一组列定义（fr 单位），这是「对齐」的唯一来源：
 		 * 两行各建一个独立 grid，但 template 完全一致，所以永远不会偏。
 		 */
-		/* 后三列常态只有 0/个位数字，给 1fr 是浪费；把宽度让给接口名 */
-		var VCOLS = '2.2fr 1.3fr 1.4fr 1.3fr .65fr .65fr .7fr';
+		/* 后三列常态只有 0/个位数字，给 1fr 是浪费；把宽度让给接口名和速率 */
+		var VCOLS = '2.2fr 1.15fr 1.3fr 1fr 1.15fr .6fr .6fr .65fr';
 		var FCOLS = '2fr 1fr 1fr 1fr';
 
 		var cell = function(content, align) {
@@ -403,6 +403,26 @@ return view.extend({
 			};
 		}
 
+		/*
+		 * 速率用两次采样的差值算。回绕已经被 realBytes 抹平了，所以这里
+		 * 相减不会出现负数。第一次渲染没有基准，返回 -1 显示成 —。
+		 */
+		var ratePrev = {};
+
+		function rateOf(ifnum, n) {
+			var now = Date.now();
+			var prev = ratePrev[ifnum];
+
+			ratePrev[ifnum] = { n: n, t: now };
+
+			if (!prev)
+				return -1;
+
+			var dt = (now - prev.t) / 1000;
+
+			return dt > 0 ? (n - prev.n) / dt : -1;
+		}
+
 		function rowsVdev(raw, list) {
 			while (vdevBody.firstChild)
 				vdevBody.removeChild(vdevBody.firstChild);
@@ -446,10 +466,13 @@ return view.extend({
 							'这个数是回绕后的余量，不是总量'
 					}, [ '↻' ]));
 
+				var rate = rateOf(v.ifnum, rb.n);
+
 				vdevBody.appendChild(grow(VCOLS, [
 					cell([ first ], 'center'),
 					cell([ fmtNum(v.rx) ], 'right'),
 					cell(rbCell, 'right'),
+					cell([ rate < 0 ? '—' : fmtBytes(rate) + '/s' ], 'right'),
 					cell([ fmtNum(v.tx) ], 'right'),
 					cell([ String(v.except || 0) ], 'right'),
 					cell([ String(v.dropped || 0) ], 'right'),
@@ -494,7 +517,8 @@ return view.extend({
 			E('div', { 'class': 'nss-grid' }, [
 				grow(VCOLS, [
 					cell('接口', 'center'), cell('收包', 'right'),
-					cell('收字节', 'right'), cell('发包', 'right'),
+					cell('收字节', 'right'), cell('接收速率', 'right'),
+					cell('发包', 'right'),
 					cell('例外', 'right'), cell('丢弃', 'right'),
 					cell('Ring 满', 'right')
 				], true),
