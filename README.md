@@ -20,7 +20,21 @@ Qualcomm IPQ 平台 **NSS Wi-Fi 卸载**状态页（LuCI / JS 版）。
 | 硬件客户端 | 上报的 peers 数 |
 | 固件线 | `nss_wifi_drv/firmware` 参数值 |
 
-**接口收发**（3 秒刷新）：接口 / rx / bytes / tx / except / dropped / hw_ring_full，逐 vdev。
+**各接口收发统计**（3 秒刷新，逐 vdev）—— 收发各三列，方向以路由器为准：
+
+| 列 | 字段 | 方向 |
+|---|---|---|
+| 收包 / 收字节 / 收速度 | `rx enqueue` / `rx bytes` | **设备 → 路由器**（上行） |
+| 发包 / 发字节 / 发速度 | `tx rcvd` / netdev `tx_bytes` | **路由器 → 设备**（下行） |
+
+表头带虚线下划线的列名可以鼠标停上去看说明。
+
+收字节取 NSS 的 `rx bytes`（32 位，每 4 GiB 回绕，页面会补并标 `↻`）；
+**发字节只能取内核 netdev 的 `tx_bytes`**（64 位，不回绕），因为 `wifili_rx` 的
+tx 行只有帧数、没有字节。取不到就显示 `—`，不拿 0 冒充。
+
+**硬件异常计数**（同一次轮询，单独一张表）：`except` / `dropped` / `hw_ring_full`，
+累计值、重启清零，三个都是 0 才正常。
 
 「接口」列显示成 `niubiAlexGaming · 5.2G（33）`，括号里就是 `wifili_rx` 报的
 `vdev if <N>` 里的 N。它是 **NSS 自己的 vdev 编号，不是 Linux 的 ifindex** ——
@@ -28,9 +42,10 @@ Qualcomm IPQ 平台 **NSS Wi-Fi 卸载**状态页（LuCI / JS 版）。
 netdev 名，所以拿不到直接映射。
 
 `/usr/libexec/nss-wifi-map` 用 `iw dev`（没有就用 `iwinfo` + sysfs）列出每个 netdev 的
-ifindex / 频率 / SSID；页面把两边**按创建顺序配对**：vdev 的 `reports` 计数严格递减
-（编号小的先创建），ifindex 也递增，于是位置一一对应。**数量对不上就一张都不配**，
-只显示编号 —— 贴错 SSID 比不贴更难排查。
+ifindex / 频率 / SSID；`nss-wifi-map stats` 另行回传每个 netdev 的 `tx_bytes`。
+页面把两边**按创建顺序配对**：vdev 的 `reports` 计数严格递减（编号小的先创建），
+ifindex 也递增，于是位置一一对应。**数量对不上就一张都不配**，只显示编号 ——
+贴错 SSID 比不贴更难排查。
 
 配对是推断出来的。验证办法：让一台只连 5.2G 的设备跑流量，看是不是编号最大的那个
 vdev 增长最快。对不上就把 `iw dev | grep -E "Interface|ssid|channel"` 的输出发出来。

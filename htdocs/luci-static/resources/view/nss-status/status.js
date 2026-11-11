@@ -74,7 +74,11 @@ var STYLE = '' +
 		'gap:.3rem;min-width:0}' +
 	'.nss-vid .nss-vw{min-width:0;overflow:hidden;text-overflow:ellipsis;' +
 		'white-space:nowrap}' +
-	'.nss-vid .nss-vn{flex:none;font-size:11px;opacity:.55}';
+	'.nss-vid .nss-vn{flex:none;font-size:11px;opacity:.55}' +
+	/* 表头带悬停说明：列名只写「收 / 发」，不看方向很容易理解反 */
+	'.nss-tip{text-decoration:underline dotted rgba(128,128,128,.55);' +
+		'text-underline-offset:3px;cursor:help}' +
+	'.nss-note{font-size:12px;opacity:.62;margin:-.1rem 0 .55rem}';
 
 var GREEN = '#43a047', RED = '#e53935', BLUE = '#2196f3', DIM = 'rgba(128,128,128,.45)';
 
@@ -93,6 +97,16 @@ function sh(cmd) {
 /* 交给 sh 解释，脚本有没有 x 位都能跑 —— 权限位在 Windows 上容易被 git 丢掉。 */
 function readWifi() {
 	return fs.exec('/bin/sh', [ WIFIMAP ]).then(function(r) {
+		return (r && r.code === 0) ? String(r.stdout || '') : '';
+	}).catch(function() { return ''; });
+}
+
+/*
+ * wifili_rx 的 tx 行只有帧数（tx rcvd / enqueue / dropped / hw_ring_full），
+ * 没有字节数，所以「发字节 / 发速度」只能从内核 netdev 统计里拿。
+ */
+function readWifiStats() {
+	return fs.exec('/bin/sh', [ WIFIMAP, 'stats' ]).then(function(r) {
 		return (r && r.code === 0) ? String(r.stdout || '') : '';
 	}).catch(function() { return ''; });
 }
@@ -135,9 +149,22 @@ function parseWifiMap(text) {
 	return map;
 }
 
+/* nss-wifi-map stats 的输出 → { ifindex: tx_bytes }。64 位计数器，不回绕。 */
+function parseWifiStats(text) {
+	var map = {};
+
+	(text || '').split('\n').forEach(function(line) {
+		var m = /^if (\d+) name (\S+) tx_bytes (\d+)$/.exec(line.trim());
+
+		if (m)
+			map[+m[1]] = +m[3];
+	});
+
+	return map;
+}
+
 /* 频率 → 频段名，和这台机器的三频对应。 */
-function bandOf(freq) {
-	if (!freq)
+function bandOf(freq) {	if (!freq)
 		return '';
 	if (freq < 3000)
 		return '2.4G';
@@ -158,7 +185,12 @@ function bandOf(freq) {
 function pairVdevs(list, wifiMap) {
 	var v = list.slice().sort(function(a, b) { return a.ifnum - b.ifnum; });
 	var w = Object.keys(wifiMap || {}).map(function(k) {
-		return { ifindex: +k, freq: wifiMap[k].freq, ssid: wifiMap[k].ssid };
+		return {
+			ifindex: +k,
+			ifname: wifiMap[k].ifname,
+			freq: wifiMap[k].freq,
+			ssid: wifiMap[k].ssid
+		};
 	}).sort(function(a, b) { return a.ifindex - b.ifindex; });
 	var out = {};
 
@@ -318,7 +350,8 @@ return view.extend({
 			cat('/sys/module/ath11k/parameters/nss_offload'),
 			cat('/sys/module/nss_wifi_drv/parameters/wlan'),
 			cat('/sys/module/nss_wifi_drv/parameters/firmware'),
-			readWifi()
+			readWifi(),
+			readWifiStats()
 		]);
 	},
 
@@ -356,14 +389,23 @@ return view.extend({
 		 * 表头和数据共用同一组列定义（fr 单位），这是「对齐」的唯一来源：
 		 * 两行各建一个独立 grid，但 template 完全一致，所以永远不会偏。
 		 */
-		/* 后三列常态只有 0/个位数字，给 1fr 是浪费；把宽度让给接口名和速率 */
-		var VCOLS = '2.2fr 1.15fr 1.3fr 1fr 1.15fr .6fr .6fr .65fr';
+		/* 7 列：接口 + 收包/收字节/收速度 + 发包/发字节/发速度，收发各给同样的宽度 */
+		var VCOLS = '2.6fr 1.15fr 1.25fr 1.05fr 1.15fr 1.25fr 1.05fr';
+		var DCOLS = '2.2fr .9fr .9fr .9fr';
 		var FCOLS = '2fr 1fr 1fr 1fr';
 
-		var cell = function(content, align) {
-			return E('div', {
+		/* tip：鼠标悬停说明。列名只有「收 / 发」两字，不看方向容易理解反 */
+		var cell = function(content, align, tip) {
+			var a = {
 				'class': 'nss-gc' + (align === 'center' ? ' c' : align === 'right' ? ' r' : '')
-			}, Array.isArray(content) ? content : [ content ]);
+			};
+
+			if (tip) {
+				a['title'] = tip;
+				a['class'] += ' nss-tip';
+			}
+
+			return E('div', a, Array.isArray(content) ? content : [ content ]);
 		};
 
 		var grow = function(cols, cells, head) {
@@ -373,8 +415,19 @@ return view.extend({
 			}, cells);
 		};
 
-		/* ---- 接口收发 ---- */
+		/*
+		 * 两张表分开：
+		 *   表一 流量 —— 收（设备 → 路由器）和发（路由器 → 设备）各三列；
+		 *   表二 异常 —— 例外 / 丢弃 / Ring 满，常态全是 0，跟流量混在一起
+		 *   会白占宽度，也容易把「丢弃」看成速率那一列。
+		 */
 		var vdevBody = E('div', {});
+		var errBody = E('div', {});
+
+		function clearBody(el) {
+			while (el.firstChild)
+				el.removeChild(el.firstChild);
+		}
 
 		/*
 		 * NSS 的 bytes 是 32 位无符号，到 4 GiB 就归零重来，别当页面算错了。
@@ -404,16 +457,17 @@ return view.extend({
 		}
 
 		/*
-		 * 速率用两次采样的差值算。回绕已经被 realBytes 抹平了，所以这里
-		 * 相减不会出现负数。第一次渲染没有基准，返回 -1 显示成 —。
+		 * 速率用两次采样的差值算。收方向的回绕已经被 realBytes 抹平了，
+		 * 发方向用的是 64 位的 netdev 计数，本来就不会绕。第一次渲染没有
+		 * 基准，返回 -1 显示成 —。
 		 */
-		var ratePrev = {};
+		var ratePrev = {}, txRatePrev = {};
 
-		function rateOf(ifnum, n) {
+		function rateOf(store, key, n) {
 			var now = Date.now();
-			var prev = ratePrev[ifnum];
+			var prev = store[key];
 
-			ratePrev[ifnum] = { n: n, t: now };
+			store[key] = { n: n, t: now };
 
 			if (!prev)
 				return -1;
@@ -423,15 +477,31 @@ return view.extend({
 			return dt > 0 ? (n - prev.n) / dt : -1;
 		}
 
-		function rowsVdev(raw, list) {
-			while (vdevBody.firstChild)
-				vdevBody.removeChild(vdevBody.firstChild);
+		/* 接口列：「SSID · 频段（编号）」；配不上就只给编号，不编名字 */
+		function ifNode(v, w) {
+			var tag = w ? [ w.ssid, bandOf(w.freq) ].filter(Boolean).join(' · ') : '';
+
+			if (!tag)
+				return E('code', {}, [ String(v.ifnum) ]);
+
+			return E('div', { 'class': 'nss-vid' }, [
+				E('span', { 'class': 'nss-vw', 'title': tag + '（' + v.ifnum + '）' }, [ tag ]),
+				E('span', { 'class': 'nss-vn' }, [ '（' + v.ifnum + '）' ])
+			]);
+		}
+
+		function rowsVdev(raw, list, stats) {
+			clearBody(vdevBody);
+			clearBody(errBody);
 
 			if (list.length === 0) {
+				var empty = raw === '' ? '无数据' : '尚未上报 vdev';
+
 				vdevBody.appendChild(grow(VCOLS, [
-					E('div', { 'class': 'nss-gc e' }, [
-						raw === '' ? '无数据' : '尚未上报 vdev'
-					])
+					E('div', { 'class': 'nss-gc e' }, [ empty ])
+				]));
+				errBody.appendChild(grow(DCOLS, [
+					E('div', { 'class': 'nss-gc e' }, [ empty ])
 				]));
 				return;
 			}
@@ -440,25 +510,9 @@ return view.extend({
 
 			list.forEach(function(v) {
 				var w = paired[v.ifnum];
-				var tag = w ? [ w.ssid, bandOf(w.freq) ].filter(Boolean).join(' · ') : '';
-				var first;
-
-				if (tag) {
-					first = E('div', { 'class': 'nss-vid' }, [
-						E('span', {
-							'class': 'nss-vw',
-							'title': tag + '（' + v.ifnum + '）'
-						}, [ tag ]),
-						E('span', { 'class': 'nss-vn' }, [ '（' + v.ifnum + '）' ])
-					]);
-				}
-				else {
-					/* 拿不到 SSID 就只给编号，不编一个名字上去 */
-					first = E('code', {}, [ String(v.ifnum) ]);
-				}
-
 				var rb = realBytes(v);
 				var rbCell = [ fmtBytes(rb.n) ];
+				var rate = rateOf(ratePrev, v.ifnum, rb.n);
 
 				if (rb.wrapped)
 					rbCell.push(' ', E('span', {
@@ -466,14 +520,28 @@ return view.extend({
 							'这个数是回绕后的余量，不是总量'
 					}, [ '↻' ]));
 
-				var rate = rateOf(v.ifnum, rb.n);
+				/*
+				 * 发送字节只能从内核 netdev 统计里取：wifili_rx 的 tx 行只有
+				 * 帧数没有字节。取不到，或者计数器一直是 0（说明这条路径不计
+				 * 入 netdev），就显示 — —— 不要用 0 冒充「没发过东西」。
+				 */
+				var txb = (w && stats[w.ifindex] !== undefined) ? stats[w.ifindex] : null;
+				var txOk = txb !== null && !(txb === 0 && (v.tx || 0) > 1000);
+				var txRate = txOk ? rateOf(txRatePrev, v.ifnum, txb) : -1;
 
 				vdevBody.appendChild(grow(VCOLS, [
-					cell([ first ], 'center'),
+					cell([ ifNode(v, w) ], 'center'),
 					cell([ fmtNum(v.rx) ], 'right'),
 					cell(rbCell, 'right'),
 					cell([ rate < 0 ? '—' : fmtBytes(rate) + '/s' ], 'right'),
 					cell([ fmtNum(v.tx) ], 'right'),
+					cell([ txOk ? fmtBytes(txb) : '—' ], 'right',
+						txOk ? null : '取不到该接口的内核发送字节计数'),
+					cell([ txRate < 0 ? '—' : fmtBytes(txRate) + '/s' ], 'right')
+				]));
+
+				errBody.appendChild(grow(DCOLS, [
+					cell([ ifNode(v, w) ], 'center'),
 					cell([ String(v.except || 0) ], 'right'),
 					cell([ String(v.dropped || 0) ], 'right'),
 					cell([ String(v.hw_ring_full || 0) ], 'right')
@@ -508,29 +576,50 @@ return view.extend({
 			});
 		}
 
-		rowsVdev(data[1], parseVdevs(data[1]));
+		rowsVdev(data[1], parseVdevs(data[1]), parseWifiStats(data[8] || ''));
 		rowsFlow(parseFlows(data[2]));
 
 		/* 列宽由 fr 分配，表头行和数据行共用同一个 template，所以不可能错位。
-		 * 外层 nss-gwrap 负责窄屏横向滚动。 */
+		 * 外层 nss-gwrap 负责窄屏横向滚动。表头带 title 的都加了虚线下划线，
+		 * 让人知道可以把鼠标停上去。 */
 		var vdevTable = E('div', { 'class': 'nss-gwrap' }, [
 			E('div', { 'class': 'nss-grid' }, [
 				grow(VCOLS, [
-					cell('接口', 'center'), cell('收包', 'right'),
-					cell('收字节', 'right'), cell('接收速率', 'right'),
-					cell('发包', 'right'),
-					cell('例外', 'right'), cell('丢弃', 'right'),
-					cell('Ring 满', 'right')
+					cell('接口', 'center'),
+					cell('收包', 'right', '设备 → 路由器：从无线上收到的帧数（累计）'),
+					cell('收字节', 'right',
+						'设备 → 路由器：收到帧的累计字节。取 NSS 计数，32 位，每 4 GiB 回绕一次'),
+					cell('收速度', 'right',
+						'设备 → 路由器：按两次采样差值算出的实时速率'),
+					cell('发包', 'right', '路由器 → 设备：发往无线的帧数（累计）'),
+					cell('发字节', 'right',
+						'路由器 → 设备：累计发送字节。取内核 netdev 计数，64 位，不会回绕'),
+					cell('发速度', 'right',
+						'路由器 → 设备：按两次采样差值算出的实时速率')
 				], true),
 				vdevBody
+			])
+		]);
+
+		var errTable = E('div', { 'class': 'nss-gwrap', 'style': 'max-width:560px' }, [
+			E('div', { 'class': 'nss-grid' }, [
+				grow(DCOLS, [
+					cell('接口', 'center'),
+					cell('例外', 'right', 'rx except：NSS 处理不了、退回 CPU 处理的帧'),
+					cell('丢弃', 'right', 'tx dropped：发送路径上被丢掉的帧'),
+					cell('Ring 满', 'right', 'tx hw_ring_full：发送 ring 没有空槽位，装不下的帧')
+				], true),
+				errBody
 			])
 		]);
 
 		var flowTable = E('div', { 'class': 'nss-gwrap' }, [
 			E('div', { 'class': 'nss-grid' }, [
 				grow(FCOLS, [
-					cell('节点'), cell('收包', 'right'),
-					cell('发包', 'right'), cell('丢弃', 'right')
+					cell('节点'),
+					cell('收包', 'right', '该硬件流节点收到的帧数（累计）'),
+					cell('发包', 'right', '该硬件流节点发出的帧数（累计）'),
+					cell('丢弃', 'right', '该硬件流节点丢掉的帧数')
 				], true),
 				flowBody
 			])
@@ -540,10 +629,25 @@ return view.extend({
 		var statePane = E('div', {}, [
 			E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, [ '各接口收发统计' ]),
+				E('div', { 'class': 'nss-note' }, [
+					'收 = 设备 → 路由器（上行），发 = 路由器 → 设备（下行）。' +
+					'鼠标停在列名上看具体含义。'
+				]),
 				vdevTable
 			]),
 			E('div', { 'class': 'cbi-section' }, [
+				E('h3', {}, [ '硬件异常计数' ]),
+				E('div', { 'class': 'nss-note' }, [
+					'累计值，重启才清零。三个都是 0 才正常；持续增长说明硬件路径在掉包。'
+				]),
+				errTable
+			]),
+			E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, [ '流转发 ', flowSummary ]),
+				E('div', { 'class': 'nss-note' }, [
+					'NSS 的硬件流表：bound 是当前生效的流数，pushed 是累计推给硬件的包数。' +
+					'pushed 不涨说明流量没走硬件，在 CPU 上转。'
+				]),
 				flowTable
 			])
 		]);
@@ -584,7 +688,8 @@ return view.extend({
 			return Promise.all([
 				cat(BUS + '/state'),
 				cat(DBG + '/wifili_rx'),
-				cat(DBG + '/flows')
+				cat(DBG + '/flows'),
+				readWifiStats()
 			]).then(function(d) {
 				var fresh = parseKv(d[0]);
 
@@ -597,7 +702,7 @@ return view.extend({
 
 				setHead(fresh.ready === '1');
 
-				rowsVdev(d[1], parseVdevs(d[1]));
+				rowsVdev(d[1], parseVdevs(d[1]), parseWifiStats(d[3] || ''));
 				rowsFlow(parseFlows(d[2]));
 			});
 		}, REFRESH);
