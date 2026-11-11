@@ -8,11 +8,11 @@
 # iw 在就用 iw（一次 dump 拿全，含 ifindex）；没有就退回 iwinfo，
 # ifindex 从 sysfs 读 —— LuCI 环境里 iwinfo 基本一定在。
 #
-# 带 stats 参数时换一套输出，只回传每个 netdev 的发送字节数：
-#     if <ifindex> name <netdev> tx_bytes <n>
-# wifili_rx 的 tx 那一行只有帧数（tx rcvd / enqueue / dropped ...），没有字节，
-# 页面要显示「发字节 / 发速度」就只能从内核 netdev 统计里取。这个计数器是 64 位，
-# 不会像 NSS 的 rx bytes 那样每 4 GiB 绕一圈。
+# 带 stats 参数时换一套输出，只回传每个 netdev 的收发字节数：
+#     if <ifindex> name <netdev> rx_bytes <n> tx_bytes <n>
+# wifili_rx 的 tx 那一行只有帧数（tx rcvd / enqueue / dropped ...），没有字节；
+# 而它的 rx bytes 是 32 位，到 4 GiB 就归零重来。这两个坑都能用内核 netdev 统计
+# 绕过去 —— 那是 64 位的，不会回绕，直接就是实际值。
 
 if [ "$1" = "stats" ]; then
 	# SYS 只是给测试用（在 PC 上指一个假的 /sys），路由器上永远是 /sys
@@ -22,9 +22,10 @@ if [ "$1" = "stats" ]; then
 		n=${d##*/}
 		case "$n" in lo) continue ;; esac
 		i=$(cat "$d/ifindex" 2>/dev/null) || continue
-		b=$(cat "$d/statistics/tx_bytes" 2>/dev/null) || continue
-		[ -n "$i" ] && [ -n "$b" ] || continue
-		printf 'if %s name %s tx_bytes %s\n' "$i" "$n" "$b"
+		r=$(cat "$d/statistics/rx_bytes" 2>/dev/null) || continue
+		t=$(cat "$d/statistics/tx_bytes" 2>/dev/null) || continue
+		[ -n "$i" ] && [ -n "$r" ] && [ -n "$t" ] || continue
+		printf 'if %s name %s rx_bytes %s tx_bytes %s\n' "$i" "$n" "$r" "$t"
 	done
 	exit 0
 fi

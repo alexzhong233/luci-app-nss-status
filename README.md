@@ -22,19 +22,21 @@ Qualcomm IPQ 平台 **NSS Wi-Fi 卸载**状态页（LuCI / JS 版）。
 
 **各接口收发统计**（3 秒刷新，逐 vdev）—— 收发各三列，方向以路由器为准：
 
-| 列 | 字段 | 方向 |
-|---|---|---|
-| 收包 / 收字节 / 收速度 | `rx enqueue` / `rx bytes` | **设备 → 路由器**（上行） |
-| 发包 / 发字节 / 发速度 | `tx rcvd` / netdev `tx_bytes` | **路由器 → 设备**（下行） |
+| 列 | 帧数来源 | 字节/速率来源 | 方向 |
+|---|---|---|---|
+| 收包 / 收字节 / 收速度 | `rx enqueue` | netdev `rx_bytes` | **设备 → 路由器**（上行） |
+| 发包 / 发字节 / 发速度 | `tx rcvd` | netdev `tx_bytes` | **路由器 → 设备**（下行） |
 
 表头带虚线下划线的列名可以鼠标停上去看说明。
 
-收字节取 NSS 的 `rx bytes`（32 位，每 4 GiB 回绕，页面会补并标 `↻`）；
-**发字节只能取内核 netdev 的 `tx_bytes`**（64 位，不回绕），因为 `wifili_rx` 的
-tx 行只有帧数、没有字节。取不到就显示 `—`，不拿 0 冒充。
+**字节数一律取内核 netdev 的 64 位统计**（`/sys/class/net/<ifname>/statistics/`），
+直接就是实际累计值，不需要补偿。`wifili_rx` 那边不能用：它的 `rx bytes` 是 32 位，
+每 4 GiB 归零；`tx` 行只有帧数、根本没有字节字段。速率按两次采样差值算，统一两位
+小数。取不到（接口没配上、或该板子不计入 netdev）就显示 `—`，不拿 0 冒充。
 
 **硬件异常计数**（同一次轮询，单独一张表）：`except` / `dropped` / `hw_ring_full`，
-累计值、重启清零，三个都是 0 才正常。
+累计值、重启清零，三个都是 0 才正常。这张表和「流转发」并排一行（窄屏 <1100px
+自动落回上下排列）。
 
 「接口」列显示成 `niubiAlexGaming · 5.2G（33）`，括号里就是 `wifili_rx` 报的
 `vdev if <N>` 里的 N。它是 **NSS 自己的 vdev 编号，不是 Linux 的 ifindex** ——
@@ -71,7 +73,8 @@ grep "vdev if" /sys/kernel/debug/39000000.nss/wifili_rx
 | `/sys/kernel/debug/39000000.nss/log` | 固件日志 |
 | `/sys/module/ath11k/parameters/nss_offload` | Y/N |
 | `/sys/module/nss_wifi_drv/parameters/wlan`、`/firmware` | 绑定网卡 / 固件线 |
-| `/usr/libexec/nss-wifi-map` | 把 vdev 的 ifindex 翻成 SSID / 频率（`iw dev`，退回 `iwinfo`） |
+| `/sys/class/net/<ifname>/statistics/{rx,tx}_bytes` | 64 位字节累计（收发字节/速率的来源） |
+| `/usr/libexec/nss-wifi-map` | 把 vdev 的 ifindex 翻成 SSID / 频率（`iw dev`，退回 `iwinfo`）；`stats` 子命令回传各 netdev 的 `rx_bytes`/`tx_bytes` |
 
 ## 依赖
 

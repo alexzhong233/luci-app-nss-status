@@ -78,7 +78,13 @@ var STYLE = '' +
 	/* 表头带悬停说明：列名只写「收 / 发」，不看方向很容易理解反 */
 	'.nss-tip{text-decoration:underline dotted rgba(128,128,128,.55);' +
 		'text-underline-offset:3px;cursor:help}' +
-	'.nss-note{font-size:12px;opacity:.62;margin:-.1rem 0 .55rem}';
+	'.nss-note{font-size:12px;opacity:.62;margin:-.1rem 0 .55rem}' +
+	/* 异常计数和流转发并排：都只有 4 列，分开各占一行太浪费竖向空间 */
+	'.nss-duo{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);' +
+		'gap:0 1.2rem;align-items:start}' +
+	'@media (max-width:1100px){.nss-duo{grid-template-columns:minmax(0,1fr)}}' +
+	/* 半宽时 460px 的最小宽度会撑出横向滚动条，这两张放小一点 */
+	'.nss-grid-sm{min-width:300px}';
 
 var GREEN = '#43a047', RED = '#e53935', BLUE = '#2196f3', DIM = 'rgba(128,128,128,.45)';
 
@@ -149,15 +155,16 @@ function parseWifiMap(text) {
 	return map;
 }
 
-/* nss-wifi-map stats 的输出 → { ifindex: tx_bytes }。64 位计数器，不回绕。 */
+/* nss-wifi-map stats 的输出 → { ifindex: { rx, tx } }。64 位计数器，不回绕。 */
 function parseWifiStats(text) {
 	var map = {};
 
 	(text || '').split('\n').forEach(function(line) {
-		var m = /^if (\d+) name (\S+) tx_bytes (\d+)$/.exec(line.trim());
+		var m = /^if (\d+) name (\S+) rx_bytes (\d+) tx_bytes (\d+)$/
+			.exec(line.trim());
 
 		if (m)
-			map[+m[1]] = +m[3];
+			map[+m[1]] = { rx: +m[3], tx: +m[4] };
 	});
 
 	return map;
@@ -273,6 +280,20 @@ function fmtBytes(n) {
 	}
 
 	return (i === 0 ? String(v) : v.toFixed(2)) + ' ' + unit[i];
+}
+
+/* 速率固定两位小数，不管落在哪个单位 —— 否则小于 1 KB/s 时会露出
+ * 84.19301164725458 这种原始浮点。 */
+function fmtRate(n) {
+	var v = Number(n) || 0, i = 0;
+	var unit = [ 'B/s', 'KB/s', 'MB/s', 'GB/s', 'TB/s' ];
+
+	while (v >= 1024 && i < unit.length - 1) {
+		v /= 1024;
+		i++;
+	}
+
+	return v.toFixed(2) + ' ' + unit[i];
 }
 
 function fmtNum(n) {
@@ -430,36 +451,8 @@ return view.extend({
 		}
 
 		/*
-		 * NSS 的 bytes 是 32 位无符号，到 4 GiB 就归零重来，别当页面算错了。
-		 * 这里记住上一次的原始值，发现变小就补一个 2^32。
-		 *
-		 * 页面打开时如果已经回绕过，历史那部分补不回来（除非它自己一直开着）。
-		 * 所以再用平均包长判断一次：以太网最小帧 64 字节，无线只会更大，
-		 * bytes/rx 掉到 60 以下就是回绕，标个 ↻ 说明这个数是余量不是总量。
-		 */
-		var WRAP = 4294967296;
-		var bytesWrap = {}, bytesPrev = {};
-
-		function realBytes(v) {
-			var base = bytesWrap[v.ifnum] || 0;
-			var prev = bytesPrev[v.ifnum];
-
-			if (prev !== undefined && v.bytes < prev) {
-				base += WRAP;
-				bytesWrap[v.ifnum] = base;
-			}
-			bytesPrev[v.ifnum] = v.bytes;
-
-			return {
-				n: v.bytes + base,
-				wrapped: base > 0 || (v.rx > 10000 && v.bytes / v.rx < 60)
-			};
-		}
-
-		/*
-		 * 速率用两次采样的差值算。收方向的回绕已经被 realBytes 抹平了，
-		 * 发方向用的是 64 位的 netdev 计数，本来就不会绕。第一次渲染没有
-		 * 基准，返回 -1 显示成 —。
+		 * 速率用两次采样的差值算。字节数取的是内核 netdev 的 64 位计数，
+		 * 不会回绕，所以相减不会出现负数。第一次渲染没有基准，返回 -1 显示成 —。
 		 */
 		var ratePrev = {}, txRatePrev = {};
 
@@ -510,34 +503,28 @@ return view.extend({
 
 			list.forEach(function(v) {
 				var w = paired[v.ifnum];
-				var rb = realBytes(v);
-				var rbCell = [ fmtBytes(rb.n) ];
-				var rate = rateOf(ratePrev, v.ifnum, rb.n);
-
-				if (rb.wrapped)
-					rbCell.push(' ', E('span', {
-						'title': 'NSS 的 bytes 是 32 位计数器，每 4 GiB 回绕一次；' +
-							'这个数是回绕后的余量，不是总量'
-					}, [ '↻' ]));
+				var s = (w && stats[w.ifindex]) ? stats[w.ifindex] : null;
 
 				/*
-				 * 发送字节只能从内核 netdev 统计里取：wifili_rx 的 tx 行只有
-				 * 帧数没有字节。取不到，或者计数器一直是 0（说明这条路径不计
-				 * 入 netdev），就显示 — —— 不要用 0 冒充「没发过东西」。
+				 * 字节数一律用内核 netdev 的 64 位统计：NSS 的 rx bytes 是 32 位，
+				 * 每 4 GiB 归零，算不出实际值；netdev 那个直接就是真实累计。
+				 * 万一某块板子不计入 netdev（取不到或恒为 0），收字节退回 NSS
+				 * 的原始计数，发字节没有可比的就显示 —。
 				 */
-				var txb = (w && stats[w.ifindex] !== undefined) ? stats[w.ifindex] : null;
-				var txOk = txb !== null && !(txb === 0 && (v.tx || 0) > 1000);
-				var txRate = txOk ? rateOf(txRatePrev, v.ifnum, txb) : -1;
+				var rxb = (s && s.rx > 0) ? s.rx : (v.bytes || 0);
+				var txb = (s && s.tx > 0) ? s.tx : null;
+				var rate = rateOf(ratePrev, v.ifnum, rxb);
+				var txRate = (txb !== null) ? rateOf(txRatePrev, v.ifnum, txb) : -1;
 
 				vdevBody.appendChild(grow(VCOLS, [
 					cell([ ifNode(v, w) ], 'center'),
 					cell([ fmtNum(v.rx) ], 'right'),
-					cell(rbCell, 'right'),
-					cell([ rate < 0 ? '—' : fmtBytes(rate) + '/s' ], 'right'),
+					cell([ fmtBytes(rxb) ], 'right'),
+					cell([ rate < 0 ? '—' : fmtRate(rate) ], 'right'),
 					cell([ fmtNum(v.tx) ], 'right'),
-					cell([ txOk ? fmtBytes(txb) : '—' ], 'right',
-						txOk ? null : '取不到该接口的内核发送字节计数'),
-					cell([ txRate < 0 ? '—' : fmtBytes(txRate) + '/s' ], 'right')
+					cell([ txb !== null ? fmtBytes(txb) : '—' ], 'right',
+						txb !== null ? null : '取不到该接口的内核发送字节计数'),
+					cell([ txRate < 0 ? '—' : fmtRate(txRate) ], 'right')
 				]));
 
 				errBody.appendChild(grow(DCOLS, [
@@ -588,12 +575,12 @@ return view.extend({
 					cell('接口', 'center'),
 					cell('收包', 'right', '设备 → 路由器：从无线上收到的帧数（累计）'),
 					cell('收字节', 'right',
-						'设备 → 路由器：收到帧的累计字节。取 NSS 计数，32 位，每 4 GiB 回绕一次'),
+						'设备 → 路由器：累计收到的字节。取内核 netdev 计数，64 位，直接是实际值'),
 					cell('收速度', 'right',
 						'设备 → 路由器：按两次采样差值算出的实时速率'),
 					cell('发包', 'right', '路由器 → 设备：发往无线的帧数（累计）'),
 					cell('发字节', 'right',
-						'路由器 → 设备：累计发送字节。取内核 netdev 计数，64 位，不会回绕'),
+						'路由器 → 设备：累计发送字节。取内核 netdev 计数，64 位，直接是实际值'),
 					cell('发速度', 'right',
 						'路由器 → 设备：按两次采样差值算出的实时速率')
 				], true),
@@ -601,8 +588,8 @@ return view.extend({
 			])
 		]);
 
-		var errTable = E('div', { 'class': 'nss-gwrap', 'style': 'max-width:560px' }, [
-			E('div', { 'class': 'nss-grid' }, [
+		var errTable = E('div', { 'class': 'nss-gwrap' }, [
+			E('div', { 'class': 'nss-grid nss-grid-sm' }, [
 				grow(DCOLS, [
 					cell('接口', 'center'),
 					cell('例外', 'right', 'rx except：NSS 处理不了、退回 CPU 处理的帧'),
@@ -614,7 +601,7 @@ return view.extend({
 		]);
 
 		var flowTable = E('div', { 'class': 'nss-gwrap' }, [
-			E('div', { 'class': 'nss-grid' }, [
+			E('div', { 'class': 'nss-grid nss-grid-sm' }, [
 				grow(FCOLS, [
 					cell('节点'),
 					cell('收包', 'right', '该硬件流节点收到的帧数（累计）'),
@@ -635,20 +622,23 @@ return view.extend({
 				]),
 				vdevTable
 			]),
-			E('div', { 'class': 'cbi-section' }, [
-				E('h3', {}, [ '硬件异常计数' ]),
-				E('div', { 'class': 'nss-note' }, [
-					'累计值，重启才清零。三个都是 0 才正常；持续增长说明硬件路径在掉包。'
+			/* 异常和转发各 4 列，并排一行；窄屏（<1100px）自动落回上下排列 */
+			E('div', { 'class': 'nss-duo' }, [
+				E('div', { 'class': 'cbi-section' }, [
+					E('h3', {}, [ '硬件异常计数' ]),
+					E('div', { 'class': 'nss-note' }, [
+						'累计值，重启才清零。三个都是 0 才正常。'
+					]),
+					errTable
 				]),
-				errTable
-			]),
-			E('div', { 'class': 'cbi-section' }, [
-				E('h3', {}, [ '流转发 ', flowSummary ]),
-				E('div', { 'class': 'nss-note' }, [
-					'NSS 的硬件流表：bound 是当前生效的流数，pushed 是累计推给硬件的包数。' +
-					'pushed 不涨说明流量没走硬件，在 CPU 上转。'
-				]),
-				flowTable
+				E('div', { 'class': 'cbi-section' }, [
+					E('h3', {}, [ '流转发 ', flowSummary ]),
+					E('div', { 'class': 'nss-note' }, [
+						'bound = 当前生效的流数，pushed = 累计推给硬件的包数。' +
+						'pushed 不涨说明没走硬件。'
+					]),
+					flowTable
+				])
 			])
 		]);
 
