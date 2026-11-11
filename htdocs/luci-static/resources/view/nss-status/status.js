@@ -356,7 +356,8 @@ return view.extend({
 		 * 表头和数据共用同一组列定义（fr 单位），这是「对齐」的唯一来源：
 		 * 两行各建一个独立 grid，但 template 完全一致，所以永远不会偏。
 		 */
-		var VCOLS = '2.8fr 1.2fr 1.4fr 1.2fr 1fr 1fr 1fr';
+		/* 后三列常态只有 0/个位数字，给 1fr 是浪费；把宽度让给接口名 */
+		var VCOLS = '2.2fr 1.3fr 1.4fr 1.3fr .65fr .65fr .7fr';
 		var FCOLS = '2fr 1fr 1fr 1fr';
 
 		var cell = function(content, align) {
