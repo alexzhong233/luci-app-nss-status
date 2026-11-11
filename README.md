@@ -22,9 +22,10 @@ Qualcomm IPQ 平台 **NSS Wi-Fi 卸载**状态页（LuCI / JS 版）。
 
 **接口收发**（3 秒刷新）：接口 / rx / bytes / tx / except / dropped / hw_ring_full，逐 vdev。
 
-「接口」列第一行是 `wifili_rx` 报的 `vdev if <N>` 里的 N。它是 **NSS 自己的 vdev 编号，
-不是 Linux 的 ifindex** —— 这台机器上 vdev 是 31/32/33，而 ifindex 是 10/11/12。
-debugfs 里既没有 MAC 也没有 netdev 名，所以拿不到直接映射。
+「接口」列显示成 `niubiAlexGaming · 5.2G（33）`，括号里就是 `wifili_rx` 报的
+`vdev if <N>` 里的 N。它是 **NSS 自己的 vdev 编号，不是 Linux 的 ifindex** ——
+这台机器上 vdev 是 31/32/33，而 ifindex 是 10/11/12。debugfs 里既没有 MAC 也没有
+netdev 名，所以拿不到直接映射。
 
 `/usr/libexec/nss-wifi-map` 用 `iw dev`（没有就用 `iwinfo` + sysfs）列出每个 netdev 的
 ifindex / 频率 / SSID；页面把两边**按创建顺序配对**：vdev 的 `reports` 计数严格递减

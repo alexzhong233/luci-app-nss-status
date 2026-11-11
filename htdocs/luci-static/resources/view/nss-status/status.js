@@ -69,10 +69,12 @@ var STYLE = '' +
 	'.nss-gc.r{text-align:right;font-variant-numeric:tabular-nums}' +
 	'.nss-gc.e{grid-column:1/-1;opacity:.6}' +
 	'.nss-grid code{padding:0;background:none;font-size:12px}' +
-	/* 接口列两行：ifindex 一行，SSID 一行；SSID 太长就省略，title 里有全名 */
-	'.nss-vid{display:flex;flex-direction:column;align-items:center;line-height:1.25}' +
-	'.nss-vid span{font-size:11px;opacity:.62;max-width:100%;' +
-		'overflow:hidden;text-overflow:ellipsis;white-space:nowrap}';
+	/* 接口列一行：「SSID · 频段（编号）」；SSID 太长省略，编号固定在右边 */
+	'.nss-vid{display:flex;align-items:baseline;justify-content:center;' +
+		'gap:.3rem;min-width:0}' +
+	'.nss-vid .nss-vw{min-width:0;overflow:hidden;text-overflow:ellipsis;' +
+		'white-space:nowrap}' +
+	'.nss-vid .nss-vn{flex:none;font-size:11px;opacity:.55}';
 
 var GREEN = '#43a047', RED = '#e53935', BLUE = '#2196f3', DIM = 'rgba(128,128,128,.45)';
 
@@ -354,7 +356,7 @@ return view.extend({
 		 * 表头和数据共用同一组列定义（fr 单位），这是「对齐」的唯一来源：
 		 * 两行各建一个独立 grid，但 template 完全一致，所以永远不会偏。
 		 */
-		var VCOLS = '1.7fr 1.4fr 1.6fr 1.4fr 1.3fr 1.3fr 1.3fr';
+		var VCOLS = '2.8fr 1.2fr 1.4fr 1.2fr 1fr 1fr 1fr';
 		var FCOLS = '2fr 1fr 1fr 1fr';
 
 		var cell = function(content, align) {
@@ -390,15 +392,25 @@ return view.extend({
 
 			list.forEach(function(v) {
 				var w = paired[v.ifnum];
-				var tag = w ? [ bandOf(w.freq), w.ssid ].filter(Boolean).join(' · ') : '';
-				var first = [ E('code', {}, [ String(v.ifnum) ]) ];
+				var tag = w ? [ w.ssid, bandOf(w.freq) ].filter(Boolean).join(' · ') : '';
+				var first;
 
-				/* 对不上就只留数字，宁可少信息，也不要贴错 SSID */
-				if (tag)
-					first.push(E('span', { 'title': tag }, [ tag ]));
+				if (tag) {
+					first = E('div', { 'class': 'nss-vid' }, [
+						E('span', {
+							'class': 'nss-vw',
+							'title': tag + '（' + v.ifnum + '）'
+						}, [ tag ]),
+						E('span', { 'class': 'nss-vn' }, [ '（' + v.ifnum + '）' ])
+					]);
+				}
+				else {
+					/* 拿不到 SSID 就只给编号，不编一个名字上去 */
+					first = E('code', {}, [ String(v.ifnum) ]);
+				}
 
 				vdevBody.appendChild(grow(VCOLS, [
-					cell([ E('div', { 'class': 'nss-vid' }, first) ], 'center'),
+					cell([ first ], 'center'),
 					cell([ fmtNum(v.rx) ], 'right'),
 					cell([ fmtBytes(v.bytes) ], 'right'),
 					cell([ fmtNum(v.tx) ], 'right'),
