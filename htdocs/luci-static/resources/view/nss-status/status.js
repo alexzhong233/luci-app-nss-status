@@ -22,6 +22,44 @@ var DBG = '/sys/kernel/debug/39000000.nss';
 var WIFIMAP = '/usr/libexec/nss-wifi-map';
 var REFRESH = 3;
 
+/*
+ * 两套 NSS 实现，debugfs 布局完全不同，页面得认两种：
+ *
+ *   nss-wifi-drv（VIKINGYFY/immortalwrt@owrt 那一套）
+ *     /sys/kernel/debug/39000000.nss/{state,wifili_rx,flows,log}
+ *     有无线口的逐 vdev 收发，有 peers / rings_ready 这类汇总；
+ *     但**没有**核心负载（驱动不上报 cpu_load_ubi）。
+ *
+ *   qca-nss-drv + qca-nss-ecm（qosmio 系，LibWrt/25.12-nss 用的）
+ *     /sys/kernel/debug/qca-nss-drv/stats/{cpu_load_ubi,n2h,ipv4,ipv6,pppoe,drv}
+ *     /sys/kernel/debug/ecm/ecm_nss_{ipv4,ipv6}/<counter>
+ *     有核心负载和 ECM 硬件流数，但拿不到每个无线口的收发。
+ *
+ * 两边的信息不可互换，所以哪个存在就走哪套渲染，不是"能不能读到"的问题。
+ */
+var QCA_STATS = '/sys/kernel/debug/qca-nss-drv/stats';
+var QCA_ECM = '/sys/kernel/debug/ecm';
+
+/* qca-nss-drv 的 stats 文件是 `name = value tag` 一行一项，tag 是核心号。 */
+var QCA_MODULES = [
+	{ id: 'n2h',   title: 'N2H 主机通道', rx: 'n2h_rx_pkts',       rxBytes: 'n2h_rx_byts',       tx: 'n2h_tx_pkts',       txBytes: 'n2h_tx_byts' },
+	{ id: 'ipv4',  title: 'IPv4 加速',    rx: 'ipv4_rx_pkts',      rxBytes: 'ipv4_rx_byts',      tx: 'ipv4_tx_pkts',      txBytes: 'ipv4_tx_byts' },
+	{ id: 'ipv6',  title: 'IPv6 加速',    rx: 'ipv6_rx_pkts',      rxBytes: 'ipv6_rx_byts',      tx: 'ipv6_tx_pkts',      txBytes: 'ipv6_tx_byts' },
+	{ id: 'pppoe', title: 'PPPoE 加速',   rx: 'pppoe_rx_packets',  rxBytes: 'pppoe_rx_bytes',    tx: 'pppoe_tx_packets',  txBytes: 'pppoe_tx_bytes' }
+];
+
+/* ECM 的计数器同样是一文件一项，内容是纯数字。 */
+var QCA_ECM_FAMILIES = [
+	{ id: 'ipv4', title: 'IPv4', dir: QCA_ECM + '/ecm_nss_ipv4' },
+	{ id: 'ipv6', title: 'IPv6', dir: QCA_ECM + '/ecm_nss_ipv6' }
+];
+
+var ECM_COUNTERS = [
+	{ key: 'accelerated_count',     title: '加速流总数' },
+	{ key: 'tcp_accelerated_count', title: 'TCP 流' },
+	{ key: 'udp_accelerated_count', title: 'UDP 流' }
+];
+
 var STYLE = '' +
 	'.nss-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));' +
 		'gap:.6rem;margin:.4rem 0 1rem}' +
@@ -270,6 +308,75 @@ function parseFlows(text) {
 	return out;
 }
 
+/*
+ * qca-nss-drv 的 stats 文件格式：
+ *
+ *     ipv4_rx_pkts = 1234567 4
+ *     ipv4_rx_byts = 987654321 4
+ *     ...
+ *
+ * 行尾那个 tag 是 NSS 核心号。同一个计数器在每个核心上各有一行，第一行
+ * （core 0）就是总量，后面的重复项不再累加 —— 这是驱动的约定，加错了会翻倍。
+ * 所以只保留第一次出现的值。
+ */
+function parseQcaStats(text) {
+	var out = {};
+
+	(text || '').split('\n').forEach(function(line) {
+		var m = line.match(/^\s*([A-Za-z0-9_\[\]-]+)\s*=\s*(\d+)\s+(\S+)\s*$/);
+
+		if (m && !(m[1] in out))
+			out[m[1]] = +m[2];
+	});
+
+	return out;
+}
+
+/*
+ * cpu_load_ubi 的格式（驱动自己算的 1 秒平均）：
+ *
+ *     Core 0:
+ *     Min  Avg  Max
+ *      4%   5%  20%
+ *     Core 1:
+ *     ...
+ *
+ * 返回 [{ id, min, avg, max }]，拿不到就是空数组。
+ */
+function parseQcaLoad(text) {
+	var cores = [], cur = null;
+
+	(text || '').split('\n').forEach(function(line) {
+		var m = line.match(/^\s*Core\s+(\d+)\s*:/i);
+
+		if (m) {
+			cur = { id: +m[1], min: null, avg: null, max: null };
+			cores.push(cur);
+			return;
+		}
+
+		if (!cur)
+			return;
+
+		m = line.match(/^\s*(\d+)%\s+(\d+)%\s+(\d+)%/);
+
+		if (m) {
+			cur.min = +m[1];
+			cur.avg = +m[2];
+			cur.max = +m[3];
+		}
+	});
+
+	return cores;
+}
+
+/* ECM 的每个计数器是一个独立文件，内容就是裸数字。 */
+function parseQcaNumber(text) {
+	var v = parseInt((text || '').trim(), 10);
+
+	return isNaN(v) ? null : v;
+}
+
 function fmtBytes(n) {
 	var v = Number(n) || 0, i = 0;
 	var unit = [ 'B', 'KB', 'MB', 'GB', 'TB' ];
@@ -361,28 +468,105 @@ function buildCards(st, offload, wlanParm, firmware) {
 	];
 }
 
+/*
+ * 读一个 debugfs 文件，不存在返回 null。
+ *
+ * 不用 fs.read：LuCI 的 file ACL 是按路径白名单放行的，读 /sys 要额外写
+ * ACL 条目，而且 rpcd 对符号链接会做二次校验（/var → /tmp 那个坑）。这里
+ * 用 /bin/sh 跑一条 `test -e && cat` —— ACL 里本来就有 /bin/sh 的 exec 权限。
+ *
+ * 也不复用 cat()：cat() 失败返回空字符串，分不出「文件不存在」和「文件是
+ * 空的」，而探测恰恰靠这个区分。
+ */
+function tryRead(path) {
+	return fs.exec('/bin/sh', [ '-c', 'test -e ' + path + ' && cat ' + path ])
+		.then(function(r) {
+			if (!r || r.code !== 0)
+				return null;
+
+			return String(r.stdout || '');
+		}).catch(function() { return null; });
+}
+
+function probe(path) {
+	return tryRead(path).then(function(v) { return v != null; });
+}
+
+function loadWifili() {
+	return Promise.all([
+		cat(BUS + '/state'),
+		cat(DBG + '/wifili_rx'),
+		cat(DBG + '/flows'),
+		readLog(),
+		cat('/sys/module/ath11k/parameters/nss_offload'),
+		cat('/sys/module/nss_wifi_drv/parameters/wlan'),
+		cat('/sys/module/nss_wifi_drv/parameters/firmware'),
+		readWifi(),
+		readWifiStats()
+	]).then(function(d) {
+		return { mode: 'wifili', d: d };
+	});
+}
+
+/*
+ * qca 后端要读的文件数量是动态的（有些模块在这个平台上不存在，比如没有
+ * PPPoE 的板子就没有 stats/pppoe），所以先拼一份 defs，统一变成 null，
+ * 渲染时按 null 判断「这个模块不可用」而不是显示 0。
+ */
+function loadQca() {
+	var defs = [ { k: 'load', p: QCA_STATS + '/cpu_load_ubi' } ];
+
+	QCA_MODULES.forEach(function(mod) {
+		defs.push({ k: 'mod:' + mod.id, p: QCA_STATS + '/' + mod.id });
+	});
+
+	QCA_ECM_FAMILIES.forEach(function(fam) {
+		ECM_COUNTERS.forEach(function(c) {
+			defs.push({ k: 'ecm:' + fam.id + ':' + c.key, p: fam.dir + '/' + c.key });
+		});
+	});
+
+	return Promise.all(defs.map(function(def) {
+		return tryRead(def.p);
+	})).then(function(res) {
+		var out = {};
+
+		defs.forEach(function(def, i) {
+			out[def.k] = res[i];
+		});
+
+		return { mode: 'qca', q: out };
+	});
+}
+
 return view.extend({
 	load: function() {
 		return Promise.all([
-			cat(BUS + '/state'),
-			cat(DBG + '/wifili_rx'),
-			cat(DBG + '/flows'),
-			readLog(),
-			cat('/sys/module/ath11k/parameters/nss_offload'),
-			cat('/sys/module/nss_wifi_drv/parameters/wlan'),
-			cat('/sys/module/nss_wifi_drv/parameters/firmware'),
-			readWifi(),
-			readWifiStats()
-		]);
+			probe(DBG + '/state'),
+			probe(QCA_STATS + '/cpu_load_ubi')
+		]).then(function(p) {
+			if (p[0])
+				return loadWifili();
+			if (p[1])
+				return loadQca();
+			return { mode: 'none' };
+		});
 	},
 
-	render: function(data) {
-		var st = parseKv(data[0]);
-		var offload = (data[4] || '').trim();
-		var wlanParm = (data[5] || '').trim();
-		var firmware = (data[6] || '').trim();
-		var log = (data[3] || '').trim();
-		var wifiMap = parseWifiMap(data[7] || '');
+	render: function(payload) {
+		if (payload.mode === 'qca')
+			return this.renderQca(payload.q);
+
+		if (payload.mode === 'none')
+			return this.renderNoBackend();
+
+		var d = payload.d;
+		var st = parseKv(d[0]);
+		var offload = (d[4] || '').trim();
+		var wlanParm = (d[5] || '').trim();
+		var firmware = (d[6] || '').trim();
+		var log = (d[3] || '').trim();
+		var wifiMap = parseWifiMap(d[7] || '');
 
 		var cards = E('div', { 'class': 'nss-cards' },
 			buildCards(st, offload, wlanParm, firmware));
@@ -563,8 +747,8 @@ return view.extend({
 			});
 		}
 
-		rowsVdev(data[1], parseVdevs(data[1]), parseWifiStats(data[8] || ''));
-		rowsFlow(parseFlows(data[2]));
+		rowsVdev(d[1], parseVdevs(d[1]), parseWifiStats(d[8] || ''));
+		rowsFlow(parseFlows(d[2]));
 
 		/* 列宽由 fr 分配，表头行和数据行共用同一个 template，所以不可能错位。
 		 * 外层 nss-gwrap 负责窄屏横向滚动。表头带 title 的都加了虚线下划线，
@@ -714,6 +898,280 @@ return view.extend({
 			E('div', { 'class': 'nss-tabs' }, [ tabState, tabLog ]),
 			statePane,
 			logPane
+		]);
+	},
+
+	/*
+	 * qca-nss-drv + qca-nss-ecm 那套的渲染。
+	 *
+	 * 信息结构和 wifili 完全不同，所以另起一套，不复用上面的表：
+	 *   · NSS 核心负载 —— cpu_load_ubi，驱动自己算的 1 秒平均
+	 *   · 各模块累计收发 + 速率 —— stats/{n2h,ipv4,ipv6,pppoe}
+	 *   · ECM 硬件加速流数 —— ecm/ecm_nss_{ipv4,ipv6}/<counter>
+	 *
+	 * 拿不到的项一律显示 —，不拿 0 冒充。这个平台没跑 PPPoE 的话，
+	 * stats/pppoe 根本不存在，显示 0 会让人以为「一次都没走过」。
+	 */
+	renderQca: function(q) {
+		var CCOLS = '1.1fr 1.2fr 1.3fr 1.2fr 1.3fr';
+		var ECOLS = '1fr 1.2fr 1fr 1fr';
+
+		var cell = function(content, align, tip) {
+			var a = {
+				'class': 'nss-gc' + (align === 'center' ? ' c' : align === 'right' ? ' r' : '')
+			};
+
+			if (tip) {
+				a['title'] = tip;
+				a['class'] += ' nss-tip';
+			}
+
+			return E('div', a, Array.isArray(content) ? content : [ content ]);
+		};
+
+		var grow = function(cols, cells, head) {
+			return E('div', {
+				'class': 'nss-gr' + (head ? ' nss-gh' : ''),
+				'style': 'grid-template-columns:' + cols
+			}, cells);
+		};
+
+		var cards = E('div', { 'class': 'nss-cards' });
+		var modBody = E('div', {});
+		var ecmBody = E('div', {});
+
+		/* 上一轮的累计值，用来算速率。第一次没有基准，速率显示 —。 */
+		var prev = null;
+
+		/* 累计值 + 下面一行小字写速率，一列里放两个数，省宽度 */
+		var numRate = function(total, rate) {
+			if (total == null)
+				return [ '—' ];
+
+			return [
+				fmtNum(total),
+				E('div', { 'style': 'font-size:11px;opacity:.6;line-height:1.3' }, [
+					rate == null ? '—' : rate
+				])
+			];
+		};
+
+		function rateOf(now, before, dt, fmt) {
+			if (now == null || before == null || !(dt > 0))
+				return null;
+
+			var diff = now - before;
+
+			/* 计数器被重置（驱动重载 / 回绕）时不要显示负数 */
+			return (diff >= 0) ? fmt(diff / dt) : null;
+		}
+
+		function fill(data) {
+			var cores = parseQcaLoad(data['load']);
+			var now = Date.now();
+			var dt = prev ? (now - prev.t) / 1000 : 0;
+
+			/* ---- 卡片 ---- */
+			var avg = cores.length
+				? Math.round(cores.reduce(function(s, c) { return s + (c.avg || 0); }, 0) / cores.length)
+				: null;
+
+			var acc = {}, hasAcc = false;
+
+			QCA_ECM_FAMILIES.forEach(function(fam) {
+				var v = parseQcaNumber(data['ecm:' + fam.id + ':accelerated_count']);
+
+				acc[fam.id] = v;
+
+				if (v != null)
+					hasAcc = true;
+			});
+
+			var totalAcc = hasAcc ? ((acc.ipv4 || 0) + (acc.ipv6 || 0)) : null;
+			var ipv4 = parseQcaStats(data['mod:ipv4']);
+			var n2h = parseQcaStats(data['mod:n2h']);
+
+			while (cards.firstChild)
+				cards.removeChild(cards.firstChild);
+
+			[
+				card('NSS 核心',
+					cores.length ? cores.length + ' 个' : '—',
+					'qca-nss-drv',
+					cores.length ? 100 : 0,
+					cores.length ? GREEN : RED),
+
+				card('平均负载',
+					avg == null ? '—' : avg + '%',
+					cores.length ? '1 秒平均 · 各核平均' : '驱动未上报',
+					avg == null ? 0 : avg,
+					avg == null ? DIM : (avg >= 80 ? RED : (avg >= 40 ? BLUE : GREEN))),
+
+				card('硬件加速流',
+					totalAcc == null ? '—' : fmtNum(totalAcc),
+					'ECM IPv4 + IPv6',
+					totalAcc ? 100 : 0,
+					totalAcc == null ? DIM : BLUE),
+
+				card('IPv4 加速包',
+					ipv4.ipv4_rx_pkts == null ? '—' : fmtNum(ipv4.ipv4_rx_pkts),
+					'累计接收',
+					ipv4.ipv4_rx_pkts ? 100 : 0,
+					ipv4.ipv4_rx_pkts == null ? DIM : BLUE),
+
+				card('N2H 通道包',
+					n2h.n2h_rx_pkts == null ? '—' : fmtNum(n2h.n2h_rx_pkts),
+					'累计接收 · 主机↔NSS',
+					n2h.n2h_rx_pkts ? 100 : 0,
+					n2h.n2h_rx_pkts == null ? DIM : BLUE)
+			].forEach(function(c) {
+				cards.appendChild(c);
+			});
+
+			/* ---- 模块吞吐 ---- */
+			while (modBody.firstChild)
+				modBody.removeChild(modBody.firstChild);
+
+			var next = { t: now, mods: {} };
+
+			QCA_MODULES.forEach(function(mod) {
+				var st = parseQcaStats(data['mod:' + mod.id]);
+				var avail = (data['mod:' + mod.id] != null);
+
+				var rx = avail ? (st[mod.rx] != null ? st[mod.rx] : null) : null;
+				var rxB = avail ? (st[mod.rxBytes] != null ? st[mod.rxBytes] : null) : null;
+				var tx = avail ? (st[mod.tx] != null ? st[mod.tx] : null) : null;
+				var txB = avail ? (st[mod.txBytes] != null ? st[mod.txBytes] : null) : null;
+
+				var p = prev && prev.mods[mod.id];
+
+				next.mods[mod.id] = { rx: rx, rxB: rxB, tx: tx, txB: txB };
+
+				modBody.appendChild(grow(CCOLS, [
+					cell([ mod.title ], null, avail ? null : '这个模块在当前平台上不存在'),
+					cell(numRate(rx, rateOf(rx, p && p.rx, dt, function(v) { return fmtNum(Math.round(v)) + ' pkt/s'; })), 'right',
+						'从 NSS 收到、交给主机的包（累计 / 实时速率）'),
+					cell(numRate(rxB, rateOf(rxB, p && p.rxB, dt, fmtRate)), 'right',
+						'对应字节数（累计 / 实时速率）'),
+					cell(numRate(tx, rateOf(tx, p && p.tx, dt, function(v) { return fmtNum(Math.round(v)) + ' pkt/s'; })), 'right',
+						'主机交给 NSS 发出去的包（累计 / 实时速率）'),
+					cell(numRate(txB, rateOf(txB, p && p.txB, dt, fmtRate)), 'right',
+						'对应字节数（累计 / 实时速率）')
+				]));
+			});
+
+			/* ---- ECM ---- */
+			while (ecmBody.firstChild)
+				ecmBody.removeChild(ecmBody.firstChild);
+
+			QCA_ECM_FAMILIES.forEach(function(fam) {
+				var vals = ECM_COUNTERS.map(function(c) {
+					return parseQcaNumber(data['ecm:' + fam.id + ':' + c.key]);
+				});
+
+				var none = vals.every(function(v) { return v == null; });
+
+				ecmBody.appendChild(grow(ECOLS, [
+					cell([ fam.title ], null, none ? 'ECM 没有这个协议族的目录' : null),
+					cell([ vals[0] == null ? '—' : fmtNum(vals[0]) ], 'right',
+						'当前被 NSS 硬件接管的连接数'),
+					cell([ vals[1] == null ? '—' : fmtNum(vals[1]) ], 'right', '其中 TCP'),
+					cell([ vals[2] == null ? '—' : fmtNum(vals[2]) ], 'right', '其中 UDP')
+				]));
+			});
+
+			prev = next;
+		}
+
+		fill(q);
+
+		var coreTable = E('div', { 'class': 'nss-gwrap' }, [
+			E('div', { 'class': 'nss-grid nss-grid-sm' }, [
+				grow(CCOLS, [
+					cell('模块'),
+					cell('收包', 'right'), cell('收字节', 'right'),
+					cell('发包', 'right'), cell('发字节', 'right')
+				], true),
+				modBody
+			])
+		]);
+
+		var ecmTable = E('div', { 'class': 'nss-gwrap' }, [
+			E('div', { 'class': 'nss-grid nss-grid-sm' }, [
+				grow(ECOLS, [
+					cell('协议'),
+					cell('加速流总数', 'right'),
+					cell('TCP 流', 'right'),
+					cell('UDP 流', 'right')
+				], true),
+				ecmBody
+			])
+		]);
+
+		poll.add(function() {
+			return loadQca().then(function(r) {
+				fill(r.q);
+			});
+		}, REFRESH);
+
+		return E('div', { 'class': 'cbi-map' }, [
+			E('style', {}, [ STYLE ]),
+			E('h2', {}, [ 'NSS 加速（qca-nss-drv）' ]),
+			E('div', { 'class': 'nss-head' }, [
+				E('span', {}, [
+					dot(true),
+					'数据来自 ',
+					E('code', {}, [ QCA_STATS ])
+				]),
+				E('span', { 'style': 'opacity:.6' },
+					[ '实时 · 每 ' + REFRESH + ' 秒' ])
+			]),
+			E('div', { 'class': 'nss-note' }, [
+				'这套上游用的是 qca-nss-drv + qca-nss-ecm，和 nss-wifi-drv 的 ' +
+				'39000000.nss 布局不同，所以看不到每个无线口的收发明细 —— ' +
+				'那部分只有 wifili 那套才提供。'
+			]),
+			cards,
+			E('div', { 'class': 'cbi-section' }, [
+				E('h3', {}, [ 'NSS 模块吞吐' ]),
+				E('div', { 'class': 'nss-note' }, [
+					'上行是「NSS → 主机」，下行是「主机 → NSS」。' +
+					'每格上面是本次开机以来的累计值，下面是实时速率。'
+				]),
+				coreTable
+			]),
+			E('div', { 'class': 'cbi-section' }, [
+				E('h3', {}, [ 'ECM 硬件加速流' ]),
+				E('div', { 'class': 'nss-note' }, [
+					'当前被 NSS 硬件接管的连接数。为 0 说明流量都在 CPU 上走。'
+				]),
+				ecmTable
+			])
+		]);
+	},
+
+	/* 两套 debugfs 都不在：说明这台机器没用 NSS，或者驱动没加载 */
+	renderNoBackend: function() {
+		return E('div', { 'class': 'cbi-map' }, [
+			E('style', {}, [ STYLE ]),
+			E('h2', {}, [ 'NSS 卸载' ]),
+			E('div', { 'class': 'nss-note' }, [
+				dot(false),
+				'没有检测到 NSS 驱动。'
+			]),
+			E('pre', { 'class': 'nss-pre' }, [
+				'检查过这两个后端，都不存在：\n\n' +
+				'  ' + DBG + '/state          （nss-wifi-drv，VIKINGYFY/owrt 那套）\n' +
+				'  ' + QCA_STATS + '/cpu_load_ubi （qca-nss-drv，LibWrt/qosmio 那套）\n\n' +
+				'可能的原因：\n' +
+				'  · 这版固件没编进 NSS 驱动；\n' +
+				'  · 驱动编进去了但没加载（nss-firmware 缺失、DTS 不匹配）；\n' +
+				'  · 机器不是 IPQ60xx / IPQ807x。\n\n' +
+				'排查：\n' +
+				'  dmesg | grep -i nss | tail -20\n' +
+				'  ls /sys/kernel/debug/ | grep -iE "nss|ecm"\n' +
+				'  lsmod | grep -i nss'
+			])
 		]);
 	},
 

@@ -1,6 +1,6 @@
 {
 	"admin/status/nss": {
-		"title": "NSS 卸载",
+		"title": "NSS 加速",
 		"order": 60,
 		"action": {
 			"type": "view",

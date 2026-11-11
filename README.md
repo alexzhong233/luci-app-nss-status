@@ -1,9 +1,19 @@
 # luci-app-nss-status
 
-Qualcomm IPQ 平台 **NSS Wi-Fi 卸载**状态页（LuCI / JS 版）。
+Qualcomm IPQ 平台 **NSS 硬件加速**状态页（LuCI / JS 版）。
 
-读 `nss-wifi-drv` 的 debugfs 节点，把「Wi-Fi 到底有没有真的卸载到 NSS 硬件」摊开给人看——
-不是看驱动版本号，是看计数器和 flow 表。
+一套页面认两种 NSS 实现，自动判断该读哪套 debugfs：
+
+| 后端 | 驱动 | debugfs | 能看到 |
+|---|---|---|---|
+| `nss-wifi-drv` | [VIKINGYFY/immortalwrt](https://github.com/VIKINGYFY/immortalwrt) `owrt` | `/sys/kernel/debug/39000000.nss/` | 每个无线口的收发、vdev、peers、流转发 |
+| `qca-nss-drv` + `qca-nss-ecm` | [qosmio 系 nss-packages](https://github.com/qosmio/nss-packages) | `/sys/kernel/debug/qca-nss-drv/stats/`、`/ecm/` | NSS 核心负载、模块吞吐、ECM 硬件流数 |
+
+判断依据是「哪个标志文件存在」：`39000000.nss/state` 在就是前者，
+`qca-nss-drv/stats/cpu_load_ubi` 在就是后者。两个都不在，页面直接告诉你去查什么，
+而不是显示一堆空框。
+
+另外会在**「状态 → 概览」**插一个 NSS 区块（不用点进来就能看到是否在工作）。
 
 ![license](https://img.shields.io/badge/license-MIT-blue.svg)
 
@@ -76,16 +86,45 @@ grep "vdev if" /sys/kernel/debug/39000000.nss/wifili_rx
 | `/sys/class/net/<ifname>/statistics/{rx,tx}_bytes` | 64 位字节累计（收发字节/速率的来源） |
 | `/usr/libexec/nss-wifi-map` | 把 vdev 的 ifindex 翻成 SSID / 频率（`iw dev`，退回 `iwinfo`）；`stats` 子命令回传各 netdev 的 `rx_bytes`/`tx_bytes` |
 
+qca-nss-drv 后端读的是这些（前一组只在对应后端存在时才读）：
+
+| 路径 | 用途 |
+|---|---|
+| `/sys/kernel/debug/qca-nss-drv/stats/cpu_load_ubi` | 各 NSS 核心 1 秒平均负载（也是后端标志） |
+| `/sys/kernel/debug/qca-nss-drv/stats/{n2h,ipv4,ipv6,pppoe}` | 模块收发计数，`name = value tag` |
+| `/sys/kernel/debug/ecm/ecm_nss_{ipv4,ipv6}/<counter>` | ECM 硬件加速流数（一文件一项） |
+
+## qca-nss-drv + ECM 模式
+
+识别到 `/sys/kernel/debug/qca-nss-drv/stats/cpu_load_ubi` 时走这套：
+
+**概览卡片**：NSS 核心数、平均负载、ECM 硬件加速流总数、IPv4 加速包、N2H 通道包
+
+**NSS 模块吞吐**：`stats/{n2h,ipv4,ipv6,pppoe}` 各模块的收发包/字节，累计值 + 实时速率
+（上下两行同格显示）
+
+**ECM 硬件加速流**：`ecm/ecm_nss_{ipv4,ipv6}/` 下 `accelerated_count` /
+`tcp_accelerated_count` / `udp_accelerated_count`
+
+几个实现细节：
+
+- `stats/*` 的行格式是 `name = value tag`，**tag 是 NSS 核心号**，同一个计数器每个核
+  各有一行。只取第一次出现的值，后面的不累加 —— 驱动约定第一行就是总量，累加会翻倍。
+- 模块文件不存在（比如没跑 PPPoE 就没有 `stats/pppoe`）时整行显示 `—`，不显示 0。
+  显示 0 会让人以为「一次都没走过」，两件事分不清。
+- 计数器被重置（驱动重载）时速率跳过那一轮，不显示负数。
+
 ## 依赖
 
 - LuCI 21.02+ / master（JS 版视图，`'require view'` 模块）
-- 内核侧：`nss-wifi-drv`（[VIKINGYFY/immortalwrt](https://github.com/VIKINGYFY/immortalwrt) `owrt` 分支所带的那套），
-  或任何提供上述 debugfs 节点的 NSS Wi-Fi 卸载驱动。
+- 内核侧二选一：
+  - `nss-wifi-drv`（[VIKINGYFY/immortalwrt](https://github.com/VIKINGYFY/immortalwrt) `owrt` 分支）
+  - `qca-nss-drv` + `qca-nss-ecm`（[qosmio 系 nss-packages](https://github.com/qosmio/nss-packages)，
+    例如 [LiBwrt/LibWrt](https://github.com/LiBwrt/LibWrt) `25.12-nss`）
 - 运行时：`iw` 或 `iwinfo` 二者其一（拿 SSID 和频率）。两个都没有时接口列只显示编号。
+  这个只有 wifili 后端用得到。
 
-**与 `qca-nss-drv` + ECM 那套是两条不同的技术栈。** 如果你的固件是 ECM 方案
-（`/sys/kernel/debug/ecm/...`），用 [shadowvershh/luci-app-nssstatus](https://github.com/shadowvershh/luci-app-nssstatus)
-更合适——那个读的是 ECM 的连接数/NSS CPU/n2h 吞吐，是 Lua 实现。
+两套都装也没关系：各读各的目录，互不干扰。
 
 ## 安装
 
@@ -98,9 +137,12 @@ UPDATE_PACKAGE "luci-app-nss-status" "alexzhong233/luci-app-nss-status" "main"
 
 **手动装 ipk**：装 `luci-app-nss-status`，然后 `/etc/init.d/rpcd restart`，刷新 LuCI。
 
-页面位置：**状态 → NSS 卸载**（`/cgi-bin/luci/admin/status/nss`）。
+页面位置：**状态 → NSS 加速**（`/cgi-bin/luci/admin/status/nss`），
+另外「状态 → 概览」里会多一个 NSS 区块。
 
 ## 换板子要改什么
+
+**只有 wifili 后端需要改**，`qca-nss-drv` 的路径是通用的（各平台一致）。
 
 DTS 里 NSS 的设备名是硬编码的，本包默认 `39000000.nss`（IPQ6000 / JDCloud AX6600 等）：
 
@@ -109,17 +151,26 @@ var BUS = '/sys/bus/platform/devices/39000000.nss';
 var DBG = '/sys/kernel/debug/39000000.nss';
 ```
 
-换板子时改成新地址（`ls /sys/bus/platform/devices | grep nss` 查）。后续版本会做自动探测。
+换板子时改成新地址（`ls /sys/bus/platform/devices | grep nss` 查）。
+改不到也不会显示错的东西 —— 探测失败就走 `qca-nss-drv` 那条，两个都没有就显示排查提示。
 
 ## 如何判断「NSS 真的在干活」
 
-别只看驱动加载没加载。看这三处：
+**nss-wifi-drv 后端**，别只看驱动加载没加载，看这三处：
 
 1. `数据平面 ready=1`、`Wi-Fi 卸载 已卸载`；
 2. `接口收发` 里 rx/bytes 随流量增长；
 3. `流转发` 的 `pushed` 在涨，说明新连接被下发了转发节点。
 
 三者都不动，就说明流量在走 CPU 软转发，卸载没生效。
+
+**qca-nss-drv 后端**：
+
+1. `NSS Core` 卡片有核数、负载不是 `—`（说明驱动已经在报状态）；
+2. 压流量时 `NSS 模块吞吐` 的 IPv4 收包速率在涨；
+3. `ECM 硬件加速流` 的总数不为 0 —— 为 0 说明连接全在 CPU 上走 conntrack，没交给硬件。
+
+第 3 条最关键：ECM 流数为 0 时，即使驱动、固件都正常，也等于没加速。
 
 ## License
 
