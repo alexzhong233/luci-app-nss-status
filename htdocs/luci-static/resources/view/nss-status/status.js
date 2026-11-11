@@ -19,6 +19,7 @@
 
 var BUS = '/sys/bus/platform/devices/39000000.nss';
 var DBG = '/sys/kernel/debug/39000000.nss';
+var WIFIMAP = '/usr/libexec/nss-wifi-map';
 var REFRESH = 3;
 
 var STYLE = '' +
@@ -67,7 +68,11 @@ var STYLE = '' +
 	'.nss-gc.c{text-align:center}' +
 	'.nss-gc.r{text-align:right;font-variant-numeric:tabular-nums}' +
 	'.nss-gc.e{grid-column:1/-1;opacity:.6}' +
-	'.nss-grid code{padding:0;background:none;font-size:12px}';
+	'.nss-grid code{padding:0;background:none;font-size:12px}' +
+	/* 接口列两行：ifindex 一行，SSID 一行；SSID 太长就省略，title 里有全名 */
+	'.nss-vid{display:flex;flex-direction:column;align-items:center;line-height:1.25}' +
+	'.nss-vid span{font-size:11px;opacity:.62;max-width:100%;' +
+		'overflow:hidden;text-overflow:ellipsis;white-space:nowrap}';
 
 var GREEN = '#43a047', RED = '#e53935', BLUE = '#2196f3', DIM = 'rgba(128,128,128,.45)';
 
@@ -79,6 +84,13 @@ function cat(path) {
 
 function sh(cmd) {
 	return fs.exec('/bin/sh', [ '-c', cmd ]).then(function(r) {
+		return (r && r.code === 0) ? String(r.stdout || '') : '';
+	}).catch(function() { return ''; });
+}
+
+/* 交给 sh 解释，脚本有没有 x 位都能跑 —— 权限位在 Windows 上容易被 git 丢掉。 */
+function readWifi() {
+	return fs.exec('/bin/sh', [ WIFIMAP ]).then(function(r) {
 		return (r && r.code === 0) ? String(r.stdout || '') : '';
 	}).catch(function() { return ''; });
 }
@@ -102,6 +114,36 @@ function parseKv(text) {
 			out[tok.slice(0, i)] = tok.slice(i + 1);
 	});
 	return out;
+}
+
+/*
+ * wifili_rx 里的 "vdev if <N>" 是 Linux 的 ifindex。nss-wifi-map 把 ifindex
+ * 翻成 SSID 和频率；拿不到就是空表，页面退回只显示数字，不瞎猜。
+ */
+function parseWifiMap(text) {
+	var map = {};
+
+	(text || '').split('\n').forEach(function(line) {
+		var m = /^if (\d+) name (\S+) freq (\d+) ssid (.*)$/.exec(line.trim());
+
+		if (m)
+			map[+m[1]] = { ifname: m[2], freq: +m[3], ssid: m[4] };
+	});
+
+	return map;
+}
+
+/* 频率 → 频段名，和这台机器的三频对应。 */
+function bandOf(freq) {
+	if (!freq)
+		return '';
+	if (freq < 3000)
+		return '2.4G';
+	if (freq < 5350)
+		return '5.2G';
+	if (freq < 5725)
+		return '5.5G';
+	return '5.8G';
 }
 
 function parseVdevs(text) {
@@ -251,7 +293,8 @@ return view.extend({
 			readLog(),
 			cat('/sys/module/ath11k/parameters/nss_offload'),
 			cat('/sys/module/nss_wifi_drv/parameters/wlan'),
-			cat('/sys/module/nss_wifi_drv/parameters/firmware')
+			cat('/sys/module/nss_wifi_drv/parameters/firmware'),
+			readWifi()
 		]);
 	},
 
@@ -261,6 +304,7 @@ return view.extend({
 		var wlanParm = (data[5] || '').trim();
 		var firmware = (data[6] || '').trim();
 		var log = (data[3] || '').trim();
+		var wifiMap = parseWifiMap(data[7] || '');
 
 		var cards = E('div', { 'class': 'nss-cards' },
 			buildCards(st, offload, wlanParm, firmware));
@@ -288,7 +332,7 @@ return view.extend({
 		 * 表头和数据共用同一组列定义（fr 单位），这是「对齐」的唯一来源：
 		 * 两行各建一个独立 grid，但 template 完全一致，所以永远不会偏。
 		 */
-		var VCOLS = '1fr 1.4fr 1.6fr 1.4fr 1.3fr 1.3fr 1.3fr';
+		var VCOLS = '1.7fr 1.4fr 1.6fr 1.4fr 1.3fr 1.3fr 1.3fr';
 		var FCOLS = '2fr 1fr 1fr 1fr';
 
 		var cell = function(content, align) {
@@ -321,8 +365,16 @@ return view.extend({
 			}
 
 			list.forEach(function(v) {
+				var w = wifiMap[v.ifnum];
+				var tag = w ? [ bandOf(w.freq), w.ssid ].filter(Boolean).join(' · ') : '';
+				var first = [ E('code', {}, [ String(v.ifnum) ]) ];
+
+				/* 对不上就只留数字，宁可少信息，也不要贴错 SSID */
+				if (tag)
+					first.push(E('span', { 'title': tag }, [ tag ]));
+
 				vdevBody.appendChild(grow(VCOLS, [
-					cell([ E('code', {}, [ String(v.ifnum) ]) ], 'center'),
+					cell([ E('div', { 'class': 'nss-vid' }, first) ], 'center'),
 					cell([ fmtNum(v.rx) ], 'right'),
 					cell([ fmtBytes(v.bytes) ], 'right'),
 					cell([ fmtNum(v.tx) ], 'right'),
@@ -368,7 +420,7 @@ return view.extend({
 		var vdevTable = E('div', { 'class': 'nss-gwrap' }, [
 			E('div', { 'class': 'nss-grid' }, [
 				grow(VCOLS, [
-					cell('接口号', 'center'), cell('收包', 'right'),
+					cell('接口', 'center'), cell('收包', 'right'),
 					cell('收字节', 'right'), cell('发包', 'right'),
 					cell('例外', 'right'), cell('丢弃', 'right'),
 					cell('Ring 满', 'right')

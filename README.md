@@ -20,7 +20,19 @@ Qualcomm IPQ 平台 **NSS Wi-Fi 卸载**状态页（LuCI / JS 版）。
 | 硬件客户端 | 上报的 peers 数 |
 | 固件线 | `nss_wifi_drv/firmware` 参数值 |
 
-**接口收发**（3 秒刷新）：`ifnum` / rx / bytes / tx / except / dropped / hw_ring_full，逐 vdev。
+**接口收发**（3 秒刷新）：接口 / rx / bytes / tx / except / dropped / hw_ring_full，逐 vdev。
+
+「接口」列第一行是 `wifili_rx` 报的 `vdev if <N>` 里的 N —— 它是 Linux 的 **ifindex**。
+`/usr/libexec/nss-wifi-map` 用 `iw dev`（没有就用 `iwinfo` + sysfs）把 ifindex 翻成
+**频段 · SSID**，显示在数字下面，长 SSID 省略、悬停看全名。对不上就只显示数字，
+不按顺序猜 —— 贴错 SSID 比不贴更难排查。
+
+想先确认映射关系，不用重编固件，路由器上直接对比两边：
+
+```sh
+iw dev | grep -E "Interface|ifindex|ssid"
+grep "vdev if" /sys/kernel/debug/39000000.nss/wifili_rx
+```
 
 **流转发**：`bound` / `pushed` 汇总 + 每个 flow 节点的转发计数。
 
@@ -36,12 +48,14 @@ Qualcomm IPQ 平台 **NSS Wi-Fi 卸载**状态页（LuCI / JS 版）。
 | `/sys/kernel/debug/39000000.nss/log` | 固件日志 |
 | `/sys/module/ath11k/parameters/nss_offload` | Y/N |
 | `/sys/module/nss_wifi_drv/parameters/wlan`、`/firmware` | 绑定网卡 / 固件线 |
+| `/usr/libexec/nss-wifi-map` | 把 vdev 的 ifindex 翻成 SSID / 频率（`iw dev`，退回 `iwinfo`） |
 
 ## 依赖
 
 - LuCI 21.02+ / master（JS 版视图，`'require view'` 模块）
 - 内核侧：`nss-wifi-drv`（[VIKINGYFY/immortalwrt](https://github.com/VIKINGYFY/immortalwrt) `owrt` 分支所带的那套），
   或任何提供上述 debugfs 节点的 NSS Wi-Fi 卸载驱动。
+- 运行时：`iw` 或 `iwinfo` 二者其一（拿 SSID 和频率）。两个都没有时接口列只显示编号。
 
 **与 `qca-nss-drv` + ECM 那套是两条不同的技术栈。** 如果你的固件是 ECM 方案
 （`/sys/kernel/debug/ecm/...`），用 [shadowvershh/luci-app-nssstatus](https://github.com/shadowvershh/luci-app-nssstatus)

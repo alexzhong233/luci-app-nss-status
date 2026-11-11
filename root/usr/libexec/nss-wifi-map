@@ -1,0 +1,43 @@
+#!/bin/sh
+# 把 wifili_rx 里的 "vdev if <N>" 翻译成人能看懂的。
+#
+# N 是 Linux 的 ifindex，所以能直接和 netdev 对上。输出固定四段：
+#     if <ifindex> name <netdev> freq <MHz> ssid <ssid>
+# 页面拿 ifindex 去匹配，匹配不上就只显示数字，不猜。
+#
+# iw 在就用 iw（一次 dump 拿全，含 ifindex）；没有就退回 iwinfo，
+# ifindex 从 sysfs 读 —— LuCI 环境里 iwinfo 基本一定在。
+
+if command -v iw >/dev/null 2>&1; then
+	iw dev 2>/dev/null | awk '
+		/^[ \t]*Interface/ { n = $2 }
+		/^[ \t]*ifindex/   { i = $2 }
+		/^[ \t]*ssid/      { s = $0; sub(/^[ \t]*ssid[ \t]+/, "", s); }
+		/^[ \t]*channel/   {
+			f = $3
+			gsub(/[()]/, "", f)
+			printf "if %s name %s freq %s ssid %s\n", i, n, f, s
+		}
+	'
+	exit 0
+fi
+
+for d in /sys/class/net/*; do
+	[ -d "$d" ] || continue
+	n=${d##*/}
+	case "$n" in
+		wlan*|*ap*) ;;
+		*) continue ;;
+	esac
+	i=$(cat "$d/ifindex" 2>/dev/null) || continue
+	[ -n "$i" ] || continue
+	info=$(iwinfo "$n" info 2>/dev/null)
+	s=$(printf '%s\n' "$info" | sed -n 's/.*ESSID:"\([^"]*\)".*/\1/p' | head -n 1)
+	f=$(printf '%s\n' "$info" | sed -n 's/.*(\([0-9.]*\) GHz).*/\1/p' | head -n 1)
+	# iwinfo 给的是 GHz（5.180），统一换算成 MHz
+	case "$f" in
+		*.*) f=$(awk -v x="$f" 'BEGIN { printf "%d", x * 1000 }') ;;
+		'')  f=0 ;;
+	esac
+	printf 'if %s name %s freq %s ssid %s\n' "$i" "$n" "$f" "$s"
+done
