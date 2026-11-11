@@ -22,10 +22,17 @@ Qualcomm IPQ 平台 **NSS Wi-Fi 卸载**状态页（LuCI / JS 版）。
 
 **接口收发**（3 秒刷新）：接口 / rx / bytes / tx / except / dropped / hw_ring_full，逐 vdev。
 
-「接口」列第一行是 `wifili_rx` 报的 `vdev if <N>` 里的 N —— 它是 Linux 的 **ifindex**。
-`/usr/libexec/nss-wifi-map` 用 `iw dev`（没有就用 `iwinfo` + sysfs）把 ifindex 翻成
-**频段 · SSID**，显示在数字下面，长 SSID 省略、悬停看全名。对不上就只显示数字，
-不按顺序猜 —— 贴错 SSID 比不贴更难排查。
+「接口」列第一行是 `wifili_rx` 报的 `vdev if <N>` 里的 N。它是 **NSS 自己的 vdev 编号，
+不是 Linux 的 ifindex** —— 这台机器上 vdev 是 31/32/33，而 ifindex 是 10/11/12。
+debugfs 里既没有 MAC 也没有 netdev 名，所以拿不到直接映射。
+
+`/usr/libexec/nss-wifi-map` 用 `iw dev`（没有就用 `iwinfo` + sysfs）列出每个 netdev 的
+ifindex / 频率 / SSID；页面把两边**按创建顺序配对**：vdev 的 `reports` 计数严格递减
+（编号小的先创建），ifindex 也递增，于是位置一一对应。**数量对不上就一张都不配**，
+只显示编号 —— 贴错 SSID 比不贴更难排查。
+
+配对是推断出来的。验证办法：让一台只连 5.2G 的设备跑流量，看是不是编号最大的那个
+vdev 增长最快。对不上就把 `iw dev | grep -E "Interface|ssid|channel"` 的输出发出来。
 
 想先确认映射关系，不用重编固件，路由器上直接对比两边：
 

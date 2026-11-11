@@ -146,6 +146,28 @@ function bandOf(freq) {
 	return '5.8G';
 }
 
+/*
+ * wifili 的 vdev 编号和 Linux 的 ifindex 是两套体系，内核没给映射表
+ * （wifili_rx 里只有 if_num 和计数，没有 MAC、也没有 netdev 名）。
+ * 但两边都是按创建顺序递增的：vdev 的 reports 严格递减（编号小的起得早），
+ * ifindex 也递增。所以按位置配对。数量对不上就一张都不配 —— 宁可只显示
+ * 编号，也不能贴个错的 SSID 上去。
+ */
+function pairVdevs(list, wifiMap) {
+	var v = list.slice().sort(function(a, b) { return a.ifnum - b.ifnum; });
+	var w = Object.keys(wifiMap || {}).map(function(k) {
+		return { ifindex: +k, freq: wifiMap[k].freq, ssid: wifiMap[k].ssid };
+	}).sort(function(a, b) { return a.ifindex - b.ifindex; });
+	var out = {};
+
+	if (v.length === 0 || v.length !== w.length)
+		return out;
+
+	v.forEach(function(item, i) { out[item.ifnum] = w[i]; });
+
+	return out;
+}
+
 function parseVdevs(text) {
 	var list = [], cur = null;
 
@@ -364,8 +386,10 @@ return view.extend({
 				return;
 			}
 
+			var paired = pairVdevs(list, wifiMap);
+
 			list.forEach(function(v) {
-				var w = wifiMap[v.ifnum];
+				var w = paired[v.ifnum];
 				var tag = w ? [ bandOf(w.freq), w.ssid ].filter(Boolean).join(' · ') : '';
 				var first = [ E('code', {}, [ String(v.ifnum) ]) ];
 
