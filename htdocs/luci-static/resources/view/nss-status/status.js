@@ -376,6 +376,33 @@ return view.extend({
 		/* ---- 接口收发 ---- */
 		var vdevBody = E('div', {});
 
+		/*
+		 * NSS 的 bytes 是 32 位无符号，到 4 GiB 就归零重来，别当页面算错了。
+		 * 这里记住上一次的原始值，发现变小就补一个 2^32。
+		 *
+		 * 页面打开时如果已经回绕过，历史那部分补不回来（除非它自己一直开着）。
+		 * 所以再用平均包长判断一次：以太网最小帧 64 字节，无线只会更大，
+		 * bytes/rx 掉到 60 以下就是回绕，标个 ↻ 说明这个数是余量不是总量。
+		 */
+		var WRAP = 4294967296;
+		var bytesWrap = {}, bytesPrev = {};
+
+		function realBytes(v) {
+			var base = bytesWrap[v.ifnum] || 0;
+			var prev = bytesPrev[v.ifnum];
+
+			if (prev !== undefined && v.bytes < prev) {
+				base += WRAP;
+				bytesWrap[v.ifnum] = base;
+			}
+			bytesPrev[v.ifnum] = v.bytes;
+
+			return {
+				n: v.bytes + base,
+				wrapped: base > 0 || (v.rx > 10000 && v.bytes / v.rx < 60)
+			};
+		}
+
 		function rowsVdev(raw, list) {
 			while (vdevBody.firstChild)
 				vdevBody.removeChild(vdevBody.firstChild);
@@ -410,10 +437,19 @@ return view.extend({
 					first = E('code', {}, [ String(v.ifnum) ]);
 				}
 
+				var rb = realBytes(v);
+				var rbCell = [ fmtBytes(rb.n) ];
+
+				if (rb.wrapped)
+					rbCell.push(' ', E('span', {
+						'title': 'NSS 的 bytes 是 32 位计数器，每 4 GiB 回绕一次；' +
+							'这个数是回绕后的余量，不是总量'
+					}, [ '↻' ]));
+
 				vdevBody.appendChild(grow(VCOLS, [
 					cell([ first ], 'center'),
 					cell([ fmtNum(v.rx) ], 'right'),
-					cell([ fmtBytes(v.bytes) ], 'right'),
+					cell(rbCell, 'right'),
 					cell([ fmtNum(v.tx) ], 'right'),
 					cell([ String(v.except || 0) ], 'right'),
 					cell([ String(v.dropped || 0) ], 'right'),
